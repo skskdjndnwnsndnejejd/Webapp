@@ -10,8 +10,8 @@
   ========================================================================= */
 
 /* ========== CONFIG (fill your values) ========== */
-const SUPABASE_URL = "https://example.supabase.co";            // <-- replace
-const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY_HERE";      // <-- replace
+const SUPABASE_URL = "https://ndpkagnezdnojsfendis.supabase.co";            // <-- replace
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5kcGthZ25lemRub2pzZmVuZGlzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIxODU1NTAsImV4cCI6MjA3Nzc2MTU1MH0.yFBUraYSm8lISBvmmCuoBzTZYy5fGV_NVdM2ATCilTc";      // <-- replace
 const OWNER_TELEGRAM_ID = "6828396702";
 /* =============================================== */
 
