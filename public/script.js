@@ -1,458 +1,455 @@
 /* =========================================================================
-   /public/script.js
-   PortHub — Blue-Black Marketplace frontend (Supabase via backend)
-   Features:
-   - Tabs: NFT's | My Gifts | Terms | Admin Panel
-   - Simple, professional blue-black design (styling in CSS)
-   - Inputs: dull blue; Buttons: cyan
-   - All Supabase access through backend endpoints (no keys here)
-   - SSE /events listener for real-time gift detection (gifts sent to manager 6828395702)
-   - Calls expected backend routes:
-       POST /api/auth                { telegram_id, username } -> { user }
-       GET  /api/items               -> { items }
-       POST /api/items/new           { telegram_id, name, price, image, link }
-       POST /api/buy                 { buyer_tg, item_id } -> { success }
-       GET  /api/gifts/:telegram_id  -> { gifts }
-       POST /api/admin/give          { admin_id, target_id, amount } -> { success }
-       GET  /api/balance/:telegram_id -> { balance }
-       SSE  /events                  -> events: new_gift, new_lot, etc.
-   ========================================================================= */
+ /public/script.js
+ PortHub — Blue-Black marketplace frontend (Supabase Realtime)
+ - Tables: users, nfts, transactions, gifts
+ - Realtime: listens INSERT on gifts -> auto-refresh My Gifts
+ - No service_role in frontend. Use anon key (or route via backend if you need security)
+ ========================================================================= */
 
-/* =========================
-   CONFIG
-   ========================= */
-const API_BASE = ""; // если backend на том же домене, оставь пустым; иначе полный URL "https://your-app.onrender.com"
+/* ============== CONFIG: замените на свои значения ============== */
+const SUPABASE_URL = "https://ndpkagnezdnojsfendis.supabase.co";        // <- замените на ваш SUPABASE_URL
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5kcGthZ25lemRub2pzZmVuZGlzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIxODU1NTAsImV4cCI6MjA3Nzc2MTU1MH0.yFBUraYSm8lISBvmmCuoBzTZYy5fGV_NVdM2ATCilTc";  // <- замените на anon key
 const OWNER_TELEGRAM_ID = "6828396702"; // менеджер, на аккаунт которого кидают NFT
+/* ============================================================ */
 
-/* =========================
-   DOM helpers
-   ========================= */
-const $ = s => document.querySelector(s);
-const $$ = s => Array.from(document.querySelectorAll(s));
-const create = (t, cls = "", html = "") => { const el = document.createElement(t); if (cls) el.className = cls; if (html) el.innerHTML = html; return el; };
+(async () => {
+  // динамически импортируем supabase-js (ESM)
+  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm');
 
-/* =========================
-   Simple state
-   ========================= */
-const State = {
-  user: null,     // {id, telegram_id, username, balance}
-  items: [],      // marketplace items
-  gifts: [],      // user's gifts
-  sse: null,
-};
+  // init client
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    realtime: { params: { eventsPerSecond: 10 } }
+  });
 
-/* =========================
-   UI elements (assume index.html has these IDs/classes)
-   ========================= */
-const elBalance = $("#balance");
-const elItems = $("#items");
-const elGifts = $("#giftList");
-const elAdminResult = $("#adminResult");
-const btnGive = $("#giveBtn");
-const inputTarget = $("#targetId");
-const inputAmount = $("#amount");
+  // --- DOM shortcuts --- (index.html must contain corresponding elements)
+  const $ = s => document.querySelector(s);
+  const $$ = s => Array.from(document.querySelectorAll(s));
 
-/* =========================
-   UTIL
-   ========================= */
-function esc(s) { if (s == null) return ""; return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
-function fmt(v) { return parseFloat(v || 0).toFixed(2); }
+  // Ensure required DOM elements exist (if not, create minimal layout)
+  function ensureLayout() {
+    if (!$('body')) return;
+    if (!$('#sunsetCanvas')) {
+      // minimal placeholders are created in index.html earlier; here we only require main .app container and tab structure
+    }
+  }
+  ensureLayout();
 
-/* =========================
-   API helper (talk to backend)
-   ========================= */
-async function apiFetch(path, opts = {}) {
-  const url = (API_BASE || "") + path;
-  const cfg = {
-    method: opts.method || "GET",
-    headers: Object.assign({ "Content-Type": "application/json" }, opts.headers || {}),
-    credentials: "same-origin",
+  // elements used by script (these ids/classes should be present in index.html)
+  const elBalance = $('#balance');
+  const elItems = $('#items');
+  const elGifts = $('#giftList');
+  const elAdminResult = $('#adminResult');
+  const btnGive = $('#giveBtn');
+  const inputTarget = $('#targetId');
+  const inputAmount = $('#amount');
+
+  // basic state
+  const State = {
+    user: null,     // {id, telegram_id, username, balance}
+    nfts: [],       // items
+    gifts: [],      // user's gifts
+    subGifts: null,
+    subNfts: null
   };
-  if (opts.body !== undefined) cfg.body = JSON.stringify(opts.body);
-  const res = await fetch(url, cfg);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`API ${path} failed ${res.status}: ${text}`);
-  }
-  return res.json();
-}
 
-/* =========================
-   Telegram init (optional)
-   ========================= */
-const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-let tgUser = null;
-if (tg) {
-  try {
-    tg.expand();
-    tgUser = (tg.initDataUnsafe && tg.initDataUnsafe.user) ? tg.initDataUnsafe.user : null;
-  } catch (e) { console.warn("tg init error", e); }
-}
+  // helper
+  const esc = s => (s == null ? '' : String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'));
+  const fmt = v => Number(v||0).toFixed(2);
 
-/* =========================
-   AUTH frontend -> call backend /api/auth
-   ========================= */
-async function authFront() {
-  try {
-    if (!tgUser) {
-      console.warn("No tg user in initDataUnsafe; UI still works for testing.");
-      return;
+  /* -------------------------
+     Telegram front auth (initDataUnsafe)
+     ------------------------- */
+  const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  let tgUser = null;
+  if (tg) {
+    try {
+      tg.expand();
+      tgUser = tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user : null;
+    } catch (e) {
+      console.warn('tg init failed', e);
     }
-    const payload = { telegram_id: tgUser.id, username: tgUser.username || tgUser.first_name || "" };
-    const json = await apiFetch("/api/auth", { method: "POST", body: payload });
-    State.user = json.user;
-    renderBalance();
-  } catch (e) {
-    console.error("authFront error", e);
   }
-}
 
-/* =========================
-   Load items & gifts
-   ========================= */
-async function loadItems() {
-  try {
-    const json = await apiFetch("/api/items");
-    State.items = json.items || [];
-    renderItems();
-  } catch (e) {
-    console.error("loadItems", e);
-    elItems.innerHTML = `<div class="empty">Ошибка загрузки каталога</div>`;
-  }
-}
+  /* -------------------------
+     Supabase helpers
+     ------------------------- */
+  async function getOrCreateUser(telegram_id, username = '') {
+    // try get user
+    const { data: users, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('telegram_id', telegram_id)
+      .limit(1);
 
-async function loadGifts() {
-  try {
-    if (!State.user) {
-      elGifts.innerHTML = `<div class="empty">Войдите через Telegram, чтобы увидеть ваши подарки</div>`;
-      return;
+    if (error) {
+      console.error('getOrCreateUser select error', error);
+      throw error;
     }
-    const json = await apiFetch(`/api/gifts/${State.user.telegram_id}`);
-    State.gifts = json.gifts || [];
-    renderGifts();
-  } catch (e) {
-    console.error("loadGifts", e);
-    elGifts.innerHTML = `<div class="empty">Ошибка загрузки подарков</div>`;
+    if (users && users.length) return users[0];
+
+    // insert
+    const { data: inserted, error: insErr } = await supabase
+      .from('users')
+      .insert([{ telegram_id, username, balance: 0 }])
+      .select()
+      .single();
+
+    if (insErr) {
+      console.error('getOrCreateUser insert error', insErr);
+      throw insErr;
+    }
+    return inserted;
   }
-}
 
-/* =========================
-   Render helpers (blue-black theme)
-   Note: actual CSS must define classes for visual appearance.
-   ========================= */
-function renderBalance() {
-  if (!elBalance) return;
-  if (!State.user) elBalance.textContent = "TON: —";
-  else elBalance.textContent = `TON: ${fmt(State.user.balance)}`;
-}
+  async function fetchNfts() {
+    const { data, error } = await supabase
+      .from('nfts')
+      .select('*, users:owner_id(id, username, telegram_id)')
+      .order('created_at', { ascending: false });
 
-function renderItems() {
-  elItems.innerHTML = "";
-  if (!State.items || State.items.length === 0) {
-    elItems.innerHTML = `<div class="empty">Нет товаров</div>`;
-    return;
+    if (error) {
+      console.error('fetchNfts error', error);
+      return [];
+    }
+    State.nfts = data || [];
+    renderNfts();
+    return State.nfts;
   }
-  for (const it of State.items) {
-    const card = create("div", "item-card");
-    const left = create("div", "item-left");
-    const img = create("img", "item-img");
-    img.src = it.image || "/images/placeholder-nft.png";
-    img.alt = it.name || "NFT";
-    const meta = create("div", "item-meta");
-    meta.innerHTML = `<div class="item-title">${esc(it.name)}</div>
-                      <div class="item-desc">${esc(it.description || "")}</div>
-                      <div class="item-price">Цена: <span class="price">${fmt(it.price)}</span> TON</div>
-                      <div class="item-owner">Владелец: <span class="mono">${it.owner ? esc(it.owner.username || it.owner.telegram_id) : "—"}</span></div>`;
-    left.appendChild(img);
-    left.appendChild(meta);
 
-    const right = create("div", "item-right");
-    const buy = create("button", "btn btn-primary", "Купить");
-    buy.addEventListener("click", () => buyItem(it.id));
-    const more = create("a", "link-more", "Подробнее");
-    more.href = it.link || "#";
-    more.target = "_blank";
-    right.appendChild(buy);
-    right.appendChild(more);
-
-    card.appendChild(left);
-    card.appendChild(right);
-    elItems.appendChild(card);
-  }
-}
-
-function renderGifts() {
-  elGifts.innerHTML = "";
-  if (!State.gifts || State.gifts.length === 0) {
-    elGifts.innerHTML = `<div class="empty">Нет подарков</div>`;
-    return;
-  }
-  for (const g of State.gifts) {
-    const card = create("div", "gift-card");
-    const img = create("img", "gift-img");
-    img.src = g.image_url || "/images/placeholder-gift.png";
-    const meta = create("div", "gift-meta");
-    meta.innerHTML = `<div class="gift-name">${esc(g.nft_name)}</div>
-                      <div class="gift-link"><a href="${esc(g.nft_link)}" target="_blank">${esc(g.nft_link)}</a></div>
-                      <div class="gift-status">Статус: <span class="mono">${esc(g.status || "в наличии")}</span></div>`;
-    const actions = create("div", "gift-actions");
-    const listBtn = create("button", "btn btn-outline", "Выставить лот");
-    listBtn.addEventListener("click", () => createLotFromGift(g));
-    actions.appendChild(listBtn);
-
-    card.appendChild(img);
-    card.appendChild(meta);
-    card.appendChild(actions);
-    elGifts.appendChild(card);
-  }
-}
-
-/* =========================
-   Purchase flow
-   ========================= */
-async function buyItem(itemId) {
-  try {
-    if (!State.user) { alert("Войдите через Telegram для покупки."); return; }
-    const it = State.items.find(i => i.id === itemId);
-    if (!it) { alert("Товар не найден."); return; }
-    if (Number(State.user.balance) < Number(it.price)) { alert("Недостаточно средств."); return; }
-    const ok = confirm(`Купить "${it.name}" за ${fmt(it.price)} TON? (Комиссия 2%)`);
-    if (!ok) return;
-
-    const res = await apiFetch("/api/buy", { method: "POST", body: { buyer_tg: State.user.telegram_id, item_id: itemId } });
-    if (res && res.success) {
-      await refreshDataAfterTx();
-      alert("Покупка успешна.");
+  async function fetchGiftsForUser(telegram_id) {
+    // look up user id first
+    const { data: users } = await supabase.from('users').select('id').eq('telegram_id', telegram_id).limit(1);
+    if (!users || users.length === 0) {
+      State.gifts = [];
+      renderGifts();
+      return [];
+    }
+    const uid = users[0].id;
+    const { data, error } = await supabase.from('gifts').select('*').eq('user_id', uid).order('created_at', { ascending: false });
+    if (error) {
+      console.error('fetchGiftsForUser error', error);
+      State.gifts = [];
     } else {
-      alert("Ошибка покупки.");
+      State.gifts = data || [];
     }
-  } catch (e) {
-    console.error("buyItem error", e);
-    alert("Ошибка покупки: " + (e.message || e));
+    renderGifts();
+    return State.gifts;
   }
-}
 
-/* =========================
-   Create lot from gift
-   ========================= */
-async function createLotFromGift(gift) {
-  try {
-    if (!State.user) { alert("Войдите через Telegram"); return; }
-    const priceStr = prompt("Укажите цену (TON) для выставления лота:", "1.00");
+  async function fetchBalance(telegram_id) {
+    const { data, error } = await supabase.from('users').select('balance').eq('telegram_id', telegram_id).single();
+    if (error) { console.error('fetchBalance', error); return null; }
+    return data.balance;
+  }
+
+  /* -------------------------
+     Realtime: subscribe to gifts and nfts
+     ------------------------- */
+  function subscribeRealtime() {
+    // unsubscribe prior
+    if (State.subGifts) State.subGifts.unsubscribe();
+    if (State.subNfts) State.subNfts.unsubscribe();
+
+    // subscribe to gifts INSERT
+    State.subGifts = supabase
+      .channel('public:gifts')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'gifts' }, payload => {
+        const gift = payload.new;
+        // If gift.to_telegram_id equals manager account -> auto processing case
+        // We'll refresh gifts for the relevant user(s).
+        console.log('Realtime gift insert', gift);
+        // If current user is the sender -> refresh their My Gifts
+        if (State.user && String(gift.from_telegram_id) === String(State.user.telegram_id)) {
+          fetchGiftsForUser(State.user.telegram_id);
+          toast('Подарок зачислен в My Gifts');
+        }
+        // If current user is manager -> refresh manager gifts
+        if (State.user && String(State.user.telegram_id) === String(OWNER_TELEGRAM_ID)) {
+          fetchGiftsForUser(State.user.telegram_id);
+          toast('Новый входящий подарок (менеджер)');
+        }
+      })
+      .subscribe(async status => {
+        console.log('gifts channel status', status);
+      });
+
+    // optionally subscribe to nfts INSERT/UPDATE to refresh marketplace live
+    State.subNfts = supabase
+      .channel('public:nfts')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'nfts' }, payload => {
+        console.log('Realtime nfts insert', payload.new);
+        fetchNfts();
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'nfts' }, payload => {
+        fetchNfts();
+      })
+      .subscribe(status => console.log('nfts channel status', status));
+  }
+
+  /* -------------------------
+     UI Rendering (blue-black style)
+     ------------------------- */
+
+  function renderBalanceUI() {
+    if (!elBalance) return;
+    if (!State.user) elBalance.textContent = 'TON: —';
+    else elBalance.textContent = `TON: ${fmt(State.user.balance)}`;
+  }
+
+  function renderNfts() {
+    if (!elItems) return;
+    elItems.innerHTML = '';
+    if (!State.nfts || State.nfts.length === 0) {
+      elItems.innerHTML = `<div class="empty">Каталог пуст</div>`;
+      return;
+    }
+    for (const it of State.nfts) {
+      const card = document.createElement('div');
+      card.className = 'item-card';
+      const left = document.createElement('div'); left.className = 'item-left';
+      const img = document.createElement('img'); img.className = 'item-img'; img.src = it.image || '/images/placeholder-nft.png';
+      const meta = document.createElement('div'); meta.className = 'item-meta';
+      meta.innerHTML = `<div class="item-title">${esc(it.name)}</div>
+                        <div class="item-desc">${esc(it.description || '')}</div>
+                        <div class="item-price">Цена: <span class="price">${fmt(it.price)}</span> TON</div>
+                        <div class="item-owner">Владелец: <span class="mono">${it.users ? esc(it.users.username || it.users.telegram_id) : '—'}</span></div>`;
+      left.appendChild(img); left.appendChild(meta);
+
+      const right = document.createElement('div'); right.className = 'item-right';
+      const buy = document.createElement('button'); buy.className = 'btn btn-primary'; buy.textContent = 'Купить';
+      buy.onclick = () => buyNft(it.id);
+      const more = document.createElement('a'); more.className = 'link-more'; more.href = it.link || '#'; more.target = '_blank'; more.textContent = 'Подробнее';
+      right.appendChild(buy); right.appendChild(more);
+
+      card.appendChild(left); card.appendChild(right);
+      elItems.appendChild(card);
+    }
+  }
+
+  function renderGifts() {
+    if (!elGifts) return;
+    elGifts.innerHTML = '';
+    if (!State.gifts || State.gifts.length === 0) {
+      // special message requested:
+      const div = document.createElement('div');
+      div.className = 'empty';
+      div.innerHTML = `<div style="font-weight:700">Подарков нет :(</div>
+                       <div style="margin-top:6px;color:#bfcbe6">Но в любой момент ты можешь их пополнить отправив NFT менеджеру!</div>`;
+      elGifts.appendChild(div);
+      return;
+    }
+    for (const g of State.gifts) {
+      const card = document.createElement('div');
+      card.className = 'gift-card';
+      card.innerHTML = `<img class="gift-img" src="${g.image_url || '/images/placeholder-gift.png'}" alt="${esc(g.nft_name)}" />
+                        <div class="gift-meta">
+                          <div class="gift-name">${esc(g.nft_name)}</div>
+                          <div class="gift-link"><a href="${esc(g.nft_link)}" target="_blank">${esc(g.nft_link)}</a></div>
+                          <div class="gift-status">Статус: <span class="mono">${esc(g.status||'в наличии')}</span></div>
+                        </div>
+                        <div class="gift-actions"><button class="btn btn-outline">Выставить лот</button></div>`;
+      elGifts.appendChild(card);
+      // attach list button event
+      const btn = card.querySelector('.btn-outline');
+      btn.addEventListener('click', () => listGiftAsItem(g));
+    }
+  }
+
+  /* -------------------------
+     Actions: buy / list / admin give
+     ------------------------- */
+  async function buyNft(itemId) {
+    if (!State.user) { alert('Войдите через Telegram'); return; }
+    const it = State.nfts.find(x => x.id === itemId);
+    if (!it) { alert('Товар не найден'); return; }
+    if (Number(State.user.balance) < Number(it.price)) { alert('Недостаточно средств'); return; }
+    if (!confirm(`Купить "${it.name}" за ${fmt(it.price)} TON? (комиссия 2%)`)) return;
+
+    try {
+      // perform transaction via Supabase RPC or direct updates.
+      // We'll implement using a single RPC-like sequence client-side (requires anon key to allow updates).
+      // Safer: you should implement /api/buy on backend and call it. Here we attempt via direct queries.
+      // 1) get buyer row
+      const { data: buyers } = await supabase.from('users').select('*').eq('telegram_id', State.user.telegram_id).limit(1);
+      const buyer = buyers && buyers[0];
+      if (!buyer) throw new Error('Buyer not found');
+      // 2) get item
+      const { data: items } = await supabase.from('nfts').select('*').eq('id', itemId).limit(1);
+      const item = items && items[0];
+      if (!item) throw new Error('Item not found');
+      // 3) get seller
+      const { data: sellers } = await supabase.from('users').select('*').eq('id', item.owner_id).limit(1);
+      const seller = sellers && sellers[0];
+      if (!seller) throw new Error('Seller not found');
+
+      const commission = Number(item.price) * 0.02;
+      const sellerGets = Number(item.price) - commission;
+
+      // perform updates in sequence (no transaction on client, but ok for MVP)
+      await supabase.from('users').update({ balance: Number(buyer.balance) - Number(item.price) }).eq('telegram_id', buyer.telegram_id);
+      await supabase.from('users').update({ balance: Number(seller.balance) + sellerGets }).eq('id', seller.id);
+      await supabase.from('nfts').update({ owner_id: buyer.id }).eq('id', item.id);
+      await supabase.from('transactions').insert([{ buyer_id: buyer.id, seller_id: seller.id, item_id: item.id, amount: item.price }]);
+
+      // refresh local state
+      State.user.balance = Number(buyer.balance) - Number(item.price);
+      await fetchNfts();
+      renderBalanceUI();
+      toast('Покупка успешна');
+    } catch (e) {
+      console.error('buyNft error', e);
+      alert('Ошибка покупки: ' + (e.message || e));
+    }
+  }
+
+  async function listGiftAsItem(gift) {
+    if (!State.user) { alert('Войдите'); return; }
+    const priceStr = prompt('Укажите цену для лота (TON):', '1.00');
     if (!priceStr) return;
     const price = Number(priceStr);
-    if (isNaN(price) || price <= 0) { alert("Некорректная цена"); return; }
-    const res = await apiFetch("/api/items/new", {
-      method: "POST",
-      body: {
-        telegram_id: State.user.telegram_id,
-        name: gift.nft_name || "Gift",
-        description: `Лот из My Gifts: ${gift.nft_name || ""}`,
+    if (isNaN(price) || price <= 0) { alert('Некорректная цена'); return; }
+    try {
+      await supabase.from('nfts').insert([{
+        name: gift.nft_name,
+        description: `Лот из My Gifts: ${gift.nft_name}`,
         price: price,
+        owner_id: State.user.id,
         image: gift.image_url,
         link: gift.nft_link
-      }
-    });
-    if (res && res.success) {
-      await loadItems();
-      alert("Лот выставлен.");
-    } else {
-      alert("Ошибка выставления лота.");
-    }
-  } catch (e) {
-    console.error("createLotFromGift", e);
-    alert("Ошибка выставления лота: " + (e.message || e));
-  }
-}
-
-/* =========================
-   Admin: give balance
-   ========================= */
-if (btnGive) {
-  btnGive.addEventListener("click", async () => {
-    const target = (inputTarget && inputTarget.value) ? inputTarget.value.trim() : null;
-    const amount = Number(inputAmount && inputAmount.value ? inputAmount.value : 0);
-    if (!target || !amount || amount <= 0) { alert("Укажите корректный ID и сумму."); return; }
-    try {
-      const res = await apiFetch("/api/admin/give", { method: "POST", body: { admin_id: tgUser ? tgUser.id : null, target_id: target, amount } });
-      if (res && res.success) {
-        elAdminResult.textContent = `Выдано ${fmt(amount)} TON пользователю ${target}.`;
-        if (State.user && String(State.user.telegram_id) === String(target)) await refreshDataAfterTx();
-      } else {
-        elAdminResult.textContent = `Ошибка: ${JSON.stringify(res)}`;
-      }
+      }]);
+      await fetchNfts();
+      toast('Лот выставлен');
     } catch (e) {
-      console.error("admin give", e);
-      elAdminResult.textContent = `Ошибка: ${e.message || e}`;
+      console.error('listGiftAsItem error', e);
+      alert('Ошибка выставления лота');
     }
+  }
+
+  if (btnGive) {
+    btnGive.addEventListener('click', async () => {
+      try {
+        const target = inputTarget.value.trim();
+        const amount = Number(inputAmount.value);
+        if (!target || !amount || amount <= 0) { alert('Заполните корректно'); return; }
+        // Only allow if current tg user equals owner? Here check local tgUser id (not secure)
+        if (!tgUser || String(tgUser.id) !== OWNER_TELEGRAM_ID) {
+          // still allow but must be done via server ideally; client-side enforcement is not secure
+          if (!confirm('Вы не менеджер. Продолжить отправку запроса на сервер?')) return;
+        }
+        // Find user by telegram_id and update
+        const { data: users } = await supabase.from('users').select('*').eq('telegram_id', target).limit(1);
+        if (!users || users.length === 0) { alert('Пользователь не найден'); return; }
+        const user = users[0];
+        await supabase.from('users').update({ balance: Number(user.balance || 0) + Number(amount) }).eq('telegram_id', target);
+        elAdminResult.textContent = `Выдано ${fmt(amount)} TON пользователю ${target}`;
+        toast('Баланс обновлён');
+      } catch (e) {
+        console.error('admin give error', e);
+        elAdminResult.textContent = 'Ошибка: ' + (e.message || e);
+      }
+    });
+  }
+
+  /* -------------------------
+     Notifications (simple toast)
+     ------------------------- */
+  function toast(msg, time = 2500) {
+    const rootId = 'ph-toast-root';
+    let root = document.getElementById(rootId);
+    if (!root) {
+      root = document.createElement('div');
+      root.id = rootId;
+      root.style.position = 'fixed';
+      root.style.right = '18px';
+      root.style.bottom = '18px';
+      root.style.zIndex = 9999;
+      document.body.appendChild(root);
+    }
+    const el = document.createElement('div');
+    el.textContent = msg;
+    el.style.background = 'linear-gradient(90deg,#0b2946,#052238)';
+    el.style.color = '#eaf6ff';
+    el.style.padding = '10px 14px';
+    el.style.borderRadius = '10px';
+    el.style.boxShadow = '0 8px 24px rgba(0,0,0,0.6)';
+    el.style.marginTop = '8px';
+    el.style.opacity = '0';
+    el.style.transition = 'all .28s ease';
+    root.appendChild(el);
+    requestAnimationFrame(()=> { el.style.opacity = '1'; el.style.transform = 'translateY(0)'; });
+    setTimeout(()=> { el.style.opacity = '0'; setTimeout(()=> el.remove(), 300); }, time);
+  }
+
+  /* -------------------------
+     Small UI helpers: tabs
+     ------------------------- */
+  $$('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      $$('.tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const tab = btn.dataset.tab;
+      $$('.tab').forEach(t => t.classList.remove('active'));
+      document.getElementById(tab).classList.add('active');
+    });
   });
-}
 
-/* =========================
-   Refresh after transaction
-   ========================= */
-async function refreshDataAfterTx() {
-  try {
-    if (State.user) {
-      const bal = await apiFetch(`/api/balance/${State.user.telegram_id}`);
-      if (bal && typeof bal.balance !== "undefined") State.user.balance = bal.balance;
+  /* -------------------------
+     Init: create/get user, fetch data, subscribe realtime
+     ------------------------- */
+  async function init() {
+    try {
+      if (tgUser) {
+        // create/get user in users table
+        State.user = await getOrCreateUser(tgUser.id, tgUser.username || tgUser.first_name || '');
+        // fetch gifts & balance
+        await fetchGiftsForUser(State.user.telegram_id);
+        const bal = await fetchBalance(State.user.telegram_id);
+        if (bal !== null) State.user.balance = bal;
+        renderBalanceUI();
+      } else {
+        // not in Telegram — just fetch NFTs to view marketplace
+        console.warn('No Telegram initDataUnsafe: limited functionality');
+      }
+      await fetchNfts();
+      subscribeRealtime();
+    } catch (e) {
+      console.error('init error', e);
     }
-    await loadItems();
-    await loadGifts();
-    renderBalance();
-  } catch (e) {
-    console.error("refreshDataAfterTx", e);
   }
-}
 
-/* =========================
-   SSE: connect to /events to receive new_gift events
-   ========================= */
-function connectSSE() {
-  try {
-    if (State.sse) { State.sse.close(); State.sse = null; }
-    const url = (API_BASE || "") + "/events";
-    const es = new EventSource(url, { withCredentials: true });
-    State.sse = es;
-    es.onopen = () => console.info("SSE connected");
-    es.onerror = e => {
-      console.warn("SSE error", e);
-      // reconnect with delay
-      setTimeout(connectSSE, 5000);
-    };
-    es.addEventListener("new_gift", ev => {
-      try {
-        const payload = JSON.parse(ev.data);
-        handleNewGift(payload);
-      } catch (e) { console.error("parse new_gift", e); }
-    });
-    es.addEventListener("new_lot", ev => {
-      try {
-        const payload = JSON.parse(ev.data);
-        // refresh items
-        loadItems();
-      } catch (e) { console.error("parse new_lot", e); }
-    });
-  } catch (e) {
-    console.error("connectSSE failed", e);
-  }
-}
+  init();
 
-/* =========================
-   Handle incoming gift event
-   payload expected structure:
-     { gift: {...}, from_telegram_id: "...", from_username: "...", to_telegram_id: "6828..." }
-   Server should emit this when gifts table gets new row or Telegram webhook detects incoming gift.
-   ========================= */
-function handleNewGift(payload) {
-  try {
-    const gift = payload.gift || payload;
-    // show simple toast
-    showToast(`Новый подарок: ${gift.nft_name || "подарок"}`);
-    // If current user is the sender, refresh their My Gifts
-    if (State.user && String(State.user.telegram_id) === String(payload.from_telegram_id)) {
-      loadGifts();
-    }
-    // If gift sent to manager, server probably created a gifts record on behalf of sender;
-    // If current user is owner (manager), refresh manager's gifts
-    if (State.user && String(State.user.telegram_id) === String(OWNER_TELEGRAM_ID)) {
-      loadGifts();
-    }
-  } catch (e) {
-    console.error("handleNewGift error", e);
-  }
-}
+  /* -------------------------
+     Minimal CSS injection for blue-black theme (inputs dull blue, buttons cyan)
+     (If you already have style.css - adapt there instead)
+     ------------------------- */
+  (function injectCSS(){
+    const css = `
+      :root{--bg:#0b0f14;--card:#0f1720;--muted:#6f7b88;--input:#071832;--btn:#36c3ff;--accent:#6fcfff;--text:#dbeafe}
+      body { background: var(--bg); color: var(--text); font-family: Inter, Poppins, system-ui, -apple-system, "Segoe UI", Roboto, Arial; }
+      .app { width: min(420px,94%); margin: 4vh auto; background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); padding: 16px; border-radius: 12px; box-shadow: 0 8px 40px rgba(0,0,0,0.6); }
+      header h1 { color: #9aa3b4; font-weight:800; margin:0; font-size:22px; letter-spacing:0.6px; }
+      header .subtitle { color: #9aa3b4; font-size:12px; margin-top:6px; }
+      #balance { color: var(--accent); font-weight:700; margin-top:8px; }
+      nav { display:flex; gap:8px; margin:12px 0; }
+      .tab-btn { flex:1; padding:8px; border-radius:8px; border: none; background:rgba(255,255,255,0.02); color:var(--text); cursor:pointer; font-weight:700; }
+      .tab-btn.active { background: linear-gradient(90deg,var(--btn), #0bb2ff); color:#001827; transform: translateY(-2px); }
+      .tab { display:none; }
+      .tab.active { display:block; }
+      .item-card, .gift-card { display:flex; gap:12px; align-items:center; padding:10px; border-radius:10px; background:var(--card); border:1px solid rgba(255,255,255,0.02); margin-bottom:10px; }
+      .item-img, .gift-img { width:72px; height:72px; object-fit:cover; border-radius:8px; background:#08182a; }
+      .item-title { font-weight:700; color:#e6f6ff; }
+      .item-desc { color:var(--muted); font-size:13px; margin-top:6px; }
+      .item-price .price { color: var(--accent); font-weight:800; }
+      .item-right { display:flex; flex-direction:column; gap:8px; align-items:flex-end; }
+      .btn { padding:8px 10px; border-radius:8px; cursor:pointer; font-weight:700; border:none; }
+      .btn-primary { background: var(--btn); color:#001827; }
+      .btn-outline { background:transparent; color:var(--accent); border:1px solid rgba(111,207,255,0.12); }
+      input[type="number"], input[type="text"] { background: var(--input); border: none; padding:10px 12px; border-radius:8px; color:var(--text); outline:none; width:100%; }
+      .empty { color:#9aa3b4; padding:12px; }
+      .mono { font-family:monospace; color:#a9c9e6; }
+    `;
+    const s = document.createElement('style'); s.textContent = css; document.head.appendChild(s);
+  })();
 
-/* =========================
-   Small toast utility
-   ========================= */
-const toastRoot = (function() {
-  let r = $("#ph-toasts");
-  if (!r) {
-    r = create("div", "");
-    r.id = "ph-toasts";
-    r.style.position = "fixed";
-    r.style.right = "18px";
-    r.style.bottom = "18px";
-    r.style.zIndex = "9999";
-    document.body.appendChild(r);
-  }
-  return r;
 })();
-
-function showToast(msg, ttl = 3000) {
-  const el = create("div", "ph-toast", esc(msg));
-  el.style.background = "rgba(10,20,40,0.9)";
-  el.style.color = "#e6f7ff";
-  el.style.padding = "10px 14px";
-  el.style.borderRadius = "10px";
-  el.style.boxShadow = "0 8px 28px rgba(0,0,0,0.6)";
-  el.style.marginTop = "8px";
-  toastRoot.appendChild(el);
-  requestAnimationFrame(() => el.style.opacity = "1");
-  setTimeout(() => { el.style.opacity = "0"; setTimeout(()=> el.remove(), 400); }, ttl);
-}
-
-/* =========================
-   Tabs behaviour (simple)
-   ========================= */
-$$(".tab-btn").forEach(btn => {
-  btn.addEventListener("click", () => {
-    $$(".tab-btn").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    const tab = btn.dataset.tab;
-    $$(".tab").forEach(t => t.classList.remove("active"));
-    $(`#${tab}`).classList.add("active");
-  });
-});
-
-/* =========================
-   Init sequence
-   ========================= */
-async function init() {
-  try {
-    if (tgUser) {
-      await authFront();
-    }
-    await loadItems();
-    await loadGifts();
-    connectSSE();
-    renderBalance();
-  } catch (e) {
-    console.error("init error", e);
-  }
-}
-init();
-
-/* =========================
-   Minimal styles note (should be in style.css)
-   - body background: dark grey/black
-   - banner: black, PortHub text tuśklo-grey + gift icon
-   - inputs: background #0e1b33 (dull blue)
-   - buttons: background #36c3ff (cyan)
-   - text: mostly light grey
-   ========================= */
-
-/* =========================
-   SERVER SIDE REMINDERS (what server must implement)
-   =========================
-   1) /api/auth (POST) - creates or returns user row by telegram_id
-   2) /api/items (GET) - returns items with owner info (join users)
-   3) /api/items/new (POST) - create new item; body: telegram_id, name, description, price, image, link
-   4) /api/buy (POST) - executes transaction: checks buyer balance, deducts, credits seller minus 2%, updates item.owner_id, inserts into transactions
-   5) /api/gifts/:telegram_id (GET) - returns gifts for a given telegram_id
-   6) /api/admin/give (POST) - only allowed for OWNER_TELEGRAM_ID: adds amount to target user's balance
-   7) /api/balance/:telegram_id (GET) - returns { balance }
-   8) /events (SSE GET) - keep connections; server emits 'new_gift' when a new gift is recorded for manager or relevant user
-      Example SSE message:
-        event: new_gift
-        data: {"gift": { ... }, "from_telegram_id":"12345","from_username":"alice","to_telegram_id":"6828396702"}
-   Notes:
-   - Server should hold Supabase service_role key and subscribe to realtime or process Telegram webhook, and forward events to SSE clients.
-   - Do NOT put Supabase service key in frontend.
-   ========================= */
-
-/* =========================
-   Done
-   ========================= */
-console.log("PortHub script loaded — blue-black marketplace ready.");
