@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🎁 PortHub</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <canvas id="sunsetCanvas"></canvas>
+
+  <div class="app">
+    <header>
+      <h1>🎁 PortHub</h1>
+      <p class="subtitle">NFT Marketplace on the Coast</p>
+      <div id="balance">💰 0.00</div>
+    </header>
+
+    <nav>
+      <button class="tab-btn active" data-tab="market">🛒 Marketplace</button>
+      <button class="tab-btn" data-tab="gifts">🎁 My Gifts</button>
+      <button class="tab-btn" data-tab="terms">📜 Terms</button>
+      <button class="tab-btn" data-tab="admin">⚙️ Admin</button>
+    </nav>
+
+    <section id="market" class="tab active">
+      <div id="items"></div>
+    </section>
+
+    <section id="gifts" class="tab">
+      <div id="giftList"></div>
+    </section>
+
+    <section id="terms" class="tab">
+      <div class="policy">
+        <h2>📜 PortHub Policy</h2>
+        <p>PortHub — это децентрализованная NFT-площадка подарков на побережье.</p>
+        <p>Все пользователи соглашаются с рисками покупки и передачи цифровых активов.</p>
+        <p>Комиссия платформы — 2%.</p>
+      </div>
+    </section>
+
+    <section id="admin" class="tab">
+      <h2>⚙️ Админ-панель</h2>
+      <div class="admin-controls">
+        <input type="number" id="targetId" placeholder="Telegram ID" />
+        <input type="number" id="amount" placeholder="Amount" />
+        <button id="giveBtn">💸 Выдать баланс</button>
+      </div>
+      <div id="adminResult"></div>
+    </section>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
