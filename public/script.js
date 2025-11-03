@@ -1,1066 +1,961 @@
 /* =========================================================================
    /public/script.js
-   🎁 PortHub - Telegram Mini-App front (Stylized canvas animation + Supabase)
-   - Canvas scenic background: sunset, birds, sun rays, stylized road arc,
-     "gangsta duck" car every 30s, ship every 60s, port crane, container,
-     bridge, waves.
-   - Tabs: Marketplace, My Gifts, Terms, Admin
-   - Supabase integration (placeholders)
-   - Telegram WebApp integration (telegram-web-app.js must be included in index.html)
-   - Commission: 2% on purchases
+   🎁 PortHub — Frontend
+   - Stylized canvas background (sun/pixels/birds/road/duck/ship/crane)
+   - Premium UI: Poppins/Inter fonts, inputs colored like background (darker)
+   - Uses backend API endpoints for secure operations (no secret keys here)
+   - SSE connection to /events for realtime gift notifications
    ========================================================================= */
 
-/* ------------- CONFIG (заполни реальные значения локально) ------------- */
-const SUPABASE_URL = "https://ndpkagnezdnojsfendis.supabase.co";      // <- замените на свой
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5kcGthZ25lemRub2pzZmVuZGlzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIxODU1NTAsImV4cCI6MjA3Nzc2MTU1MH0.yFBUraYSm8lISBvmmCuoBzTZYy5fGV_NVdM2ATCilTc";          // <- замените на свой
-const API_BASE = ""; // если у тебя node backend проксирует запросы, можно указать путь, иначе ''
-// Администратор Telegram ID (как строка). OWNER_TELEGRAM_ID задаётся в среде сервера,
-// но фронт всё равно должен знать, текущий пользователь сравнивается с этим значением.
+/* =======================
+   0. CONFIG / ADJUST HERE
+   ======================= */
+// If your backend is at the same origin, API_BASE = ''. If separate, set full URL.
+const API_BASE = ""; // e.g. "https://your-render-service.onrender.com" or '' for same origin
+
+// Owner Telegram ID (manager) — the account that receives collectibles
 const OWNER_TELEGRAM_ID = "6828396702";
 
-/* ------------- Подгрузка Supabase клиентa (динамически, без npm) -------------
-   Здесь используется встроенная мини-реализация для fetch-обёртки Supabase
-   чтобы не требовать сборки. Если ты подключаешь @supabase/supabase-js в проекте,
-   замени блок с простой fetch-обёрткой на официальный клиент.
------------------------------------------------------------------------------*/
+/* =======================
+   1. Fonts injection (Poppins + Inter from Google)
+   ======================= */
+(function loadFonts() {
+  const link = document.createElement("link");
+  link.href = "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=Poppins:wght@400;600;800&display=swap";
+  link.rel = "stylesheet";
+  document.head.appendChild(link);
+})();
 
-// Небольшая утилита для вызовa backend API (через node server или напрямую к Supabase REST)
+/* =======================
+   2. Utilities
+   ======================= */
+const $ = sel => document.querySelector(sel);
+const $$ = sel => Array.from(document.querySelectorAll(sel));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const formatTon = v => parseFloat(v || 0).toFixed(2) + " TON";
+const qCreate = (tag, cls, html) => { const el = document.createElement(tag); if (cls) el.className = cls; if (html) el.innerHTML = html; return el; };
+
+/* =======================
+   3. DOM references
+   ======================= */
+// assume index.html layout as previously created
+const rootApp = document.querySelector(".app") || document.body;
+const tabsBtns = () => $$(".tab-btn");
+const tabSections = () => $$(".tab");
+const balanceNode = $("#balance");
+const itemsNode = $("#items");
+const giftListNode = $("#giftList");
+const adminResultNode = $("#adminResult");
+const giveBtn = $("#giveBtn");
+const targetIdInput = $("#targetId");
+const amountInput = $("#amount");
+
+/* =======================
+   4. State
+   ======================= */
+const State = {
+  user: null,    // {id, telegram_id, username, balance}
+  items: [],
+  gifts: [],
+  lastGiftTimestamp: 0,
+  sse: null,
+  animPaused: false
+};
+
+/* =======================
+   5. Safe API helper (talks to your server)
+   ======================= */
 async function apiFetch(path, opts = {}) {
   const url = (API_BASE || "") + path;
-  const defaultHeaders = { "Content-Type": "application/json" };
-  opts.headers = Object.assign({}, defaultHeaders, opts.headers || {});
-  if (opts.body && typeof opts.body === "object") opts.body = JSON.stringify(opts.body);
-  const res = await fetch(url, opts);
-  if (!res.ok) {
-    const text = await res.text();
-    let err;
-    try { err = JSON.parse(text); } catch(e) { err = text; }
-    throw { status: res.status, error: err };
-  }
-  return res.json();
-}
-
-/* ------------- Telegram Web App init ------------- */
-const tg = window.Telegram ? window.Telegram.WebApp : null;
-if (!tg) {
-  console.warn("Telegram WebApp SDK не найден. Убедитесь, что в index.html подключён telegram-web-app.js");
-}
-
-// initDataUnsafe содержит данные пользователя без проверки подписи (подходит для UI)
-let tgUser = null;
-try {
-  if (tg) {
-    tg.expand();
-    const initDataUnsafe = tg.initDataUnsafe || {};
-    tgUser = initDataUnsafe.user || null;
-    // tgUser содержит: id, is_bot, first_name, last_name, username, language_code
-  }
-} catch (e) {
-  console.warn("Не удалось получить initDataUnsafe:", e);
-}
-
-/* ------------- DOM helpers ------------- */
-const qs = s => document.querySelector(s);
-const qsa = s => Array.from(document.querySelectorAll(s));
-const $items = qs("#items");
-const $giftList = qs("#giftList");
-const $balance = qs("#balance");
-const $adminResult = qs("#adminResult");
-const $giveBtn = qs("#giveBtn");
-const $targetIdInput = qs("#targetId");
-const $amountInput = qs("#amount");
-
-/* ------------- State ------------- */
-const state = {
-  user: null,            // Supabase user row: {id, telegram_id, username, balance}
-  items: [],             // marketplace items
-  gifts: [],             // user's gifts
-  selectedItem: null,
-  loading: false
-};
-
-/* ------------- Supabase helper (simple wrapper) -------------
-   Мы используем REST-запросы через Supabase REST API (или через backend).
-   Чтобы не раскрывать публично service_role ключ на фронте, лучше вызывать
-   свой backend (/api/...) который использует service role key.
-   Тем не менее, если ты используешь anon key — подставь в SUPABASE_KEY (но это
-   менее безопасно). Обычно frontend использует anon key, backend — service role.
------------------------------------------------------------------------------*/
-
-const supabaseFetch = async (method, table, body = null, query = "") => {
-  const url = `${SUPABASE_URL}/rest/v1/${table}${query}`;
-  const headers = {
-    apikey: SUPABASE_KEY,
-    Authorization: `Bearer ${SUPABASE_KEY}`,
-    "Content-Type": "application/json",
-    Prefer: "return=representation"
-  };
-  const res = await fetch(url, {
-    method,
+  const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+  const cfg = {
+    method: opts.method || "GET",
     headers,
-    body: body ? JSON.stringify(body) : undefined
-  });
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`Supabase ${method} ${table} failed: ${res.status} ${txt}`);
+    credentials: "same-origin"
+  };
+  if (opts.body !== undefined) cfg.body = JSON.stringify(opts.body);
+  const r = await fetch(url, cfg);
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`API ${path} failed ${r.status}: ${text}`);
   }
-  return res.json();
-};
+  return r.json();
+}
 
-/* ------------- UI: табы ------------- */
-qsa(".tab-btn").forEach(btn => {
-  btn.addEventListener("click", (e) => {
-    qsa(".tab-btn").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    const tab = btn.dataset.tab;
-    qsa(".tab").forEach(t => t.classList.remove("active"));
-    qs(`#${tab}`).classList.add("active");
-  });
-});
-
-/* ------------- Data loaders ------------- */
-
-async function authFront() {
-  // если у нас есть tgUser (initDataUnsafe), используем telegram_id для регистрации через backend
+/* =======================
+   6. Auth init (Telegram WebApp integration)
+   ======================= */
+const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+let tgUser = null;
+if (tg) {
   try {
-    if (!tgUser) {
-      // нет tgUser: возможно открыт в браузере напрямую — попробуем прочесть session из cookie
-      console.warn("Telegram user not found in initDataUnsafe");
-      return;
-    }
-
-    const telegram_id = tgUser.id;
-    const username = tgUser.username || `${tgUser.first_name || ''}`;
-
-    // Вызов backend /api/auth, чтобы создать/получить user row из Supabase
-    // Если у тебя Node backend — используй/api/auth; иначе напрямую запрос к supabase
-    try {
-      // Prefer backend route if available (safer)
-      if (API_BASE) {
-        const json = await apiFetch("/api/auth", {
-          method: "POST",
-          body: { telegram_id, username }
-        });
-        state.user = json.user;
-      } else {
-        // Прямой insert/select в users через Supabase REST (anon key required)
-        // Проверим существование
-        const users = await supabaseFetch("GET", "users", null, `?telegram_id=eq.${telegram_id}`);
-        if (users && users.length > 0) {
-          state.user = users[0];
-        } else {
-          // создать
-          const created = await supabaseFetch("POST", "users", [{ telegram_id, username, balance: 0 }]);
-          if (Array.isArray(created) && created.length > 0) state.user = created[0];
-        }
-      }
-      renderBalance();
-    } catch (err) {
-      console.error("authFront error:", err);
-    }
+    tg.expand();
+    tgUser = tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user : null;
+    // optionally set theme params
+    if (tg.MainButton) tg.MainButton.hide();
   } catch (e) {
-    console.error("authFront failed:", e);
+    console.warn("tg init error", e);
   }
 }
 
-async function loadItems() {
-  try {
-    // prefer backend
-    if (API_BASE) {
-      const json = await apiFetch("/api/items");
-      state.items = json.items || [];
-    } else {
-      // fetch via Supabase REST (include owner data via RPC not possible; we'll fetch owner separately)
-      // for simplicity, pull items and then fetch users mapping
-      const items = await supabaseFetch("GET", "items", null, "?select=*&order=created_at.desc");
-      state.items = items;
-      // optionally attach owner username
-      const ownerIds = [...new Set(state.items.map(it => it.owner_id).filter(Boolean))];
-      if (ownerIds.length) {
-        const q = ownerIds.map(id => `id.eq.${id}`).join(",");
-        // supabase REST doesn't support OR easily; to keep simple we can fetch all users and map
-        const users = await supabaseFetch("GET", "users", null, "?select=id,username,telegram_id");
-        const usersById = Object.fromEntries((users || []).map(u => [u.id, u]));
-        state.items.forEach(it => { it.owner = usersById[it.owner_id] || null; });
-      }
-    }
-    renderItems();
-  } catch (e) {
-    console.error("loadItems error", e);
-    $items.innerHTML = `<div style="color:#ffddaa">Ошибка при загрузке товаров</div>`;
-  }
-}
-
-async function loadGifts() {
-  try {
-    if (!state.user) {
-      $giftList.innerHTML = `<div>Войдите через Telegram, чтобы увидеть подарки.</div>`;
-      return;
-    }
-    if (API_BASE) {
-      const json = await apiFetch(`/api/gifts/${state.user.telegram_id}`);
-      state.gifts = json.gifts || [];
-    } else {
-      // fetch gifts via supabase
-      const query = `?select=*&user_id=eq.${state.user.id}`;
-      const gifts = await supabaseFetch("GET", "gifts", null, query);
-      state.gifts = gifts || [];
-    }
-    renderGifts();
-  } catch (e) {
-    console.error("loadGifts error", e);
-    $giftList.innerHTML = `<div style="color:#ffddaa">Ошибка при загрузке подарков</div>`;
-  }
-}
-
-/* ------------- UI renderers ------------- */
-
-function renderBalance() {
-  if (!state.user) {
-    $balance.innerText = "💰 —";
-  } else {
-    const val = Number(state.user.balance || 0).toFixed(2);
-    $balance.innerText = `💰 ${val} TON`;
-  }
-}
-
-function renderItems() {
-  $items.innerHTML = "";
-  if (!state.items || state.items.length === 0) {
-    $items.innerHTML = `<div style="padding:14px;color:#eee">Нет товаров в каталоге</div>`;
+async function frontAuth() {
+  if (!tgUser) {
+    console.warn("No Telegram user in initDataUnsafe — you can still work in dev mode.");
     return;
   }
-  state.items.forEach(it => {
-    // item card
-    const div = document.createElement("div");
-    div.className = "item-card";
-    div.style.display = "flex";
-    div.style.justifyContent = "space-between";
-    div.innerHTML = `
-      <div style="display:flex;align-items:center;gap:12px">
-        <img src="${it.image || 'https://via.placeholder.com/120x120?text=NFT'}" alt="${escapeHtml(it.name)}"/>
-        <div style="min-width:160px">
-          <div style="font-weight:700;font-size:16px">${escapeHtml(it.name)}</div>
-          <div style="font-size:13px;color:#f7e6ff;margin-top:6px">${truncate(escapeHtml(it.description || ''), 80)}</div>
-          <div style="font-size:13px;margin-top:6px;color:#ffd866">Цена: ${Number(it.price).toFixed(2)} TON</div>
-          <div style="font-size:12px;color:#ffddee;margin-top:4px">Владелец: ${it.owner ? escapeHtml(it.owner.username || `tg:${it.owner.telegram_id}`) : '—'}</div>
-        </div>
-      </div>
-      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
-        <button class="buy-btn">Приобрести</button>
-        <a class="more-link" href="${it.link || '#'}" target="_blank" style="color:#ffd866;font-size:12px;text-decoration:none">Подробнее</a>
-      </div>
-    `;
-    const buyBtn = div.querySelector(".buy-btn");
-    buyBtn.addEventListener("click", () => onBuyItem(it.id));
-    $items.appendChild(div);
-  });
+  // call backend to create/get user
+  try {
+    const payload = { telegram_id: tgUser.id, username: tgUser.username || (tgUser.first_name || "") };
+    const res = await apiFetch("/api/auth", { method: "POST", body: payload });
+    State.user = res.user;
+    renderBalance();
+  } catch (err) {
+    console.error("frontAuth error:", err);
+  }
+}
+
+/* =======================
+   7. Render helpers (premium style)
+   ======================= */
+function renderBalance() {
+  if (!balanceNode) return;
+  if (!State.user) {
+    balanceNode.textContent = "💰 —";
+  } else {
+    balanceNode.textContent = `💰 ${Number(State.user.balance || 0).toFixed(2)} TON`;
+  }
+}
+
+function escapeHtml(s) { if (s == null) return ""; return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+/* =======================
+   8. Items & Gifts render with premium cards
+   ======================= */
+function clearNode(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+function renderItems() {
+  clearNode(itemsNode);
+  if (!State.items || State.items.length === 0) {
+    const empty = qCreate("div", "empty-note", "Каталог пуст — зайди позже.");
+    itemsNode.appendChild(empty);
+    return;
+  }
+
+  for (const it of State.items) {
+    const card = qCreate("div", "item-card");
+    const left = qCreate("div", "item-left");
+    const img = qCreate("img", "item-img");
+    img.src = it.image || "/images/placeholder-nft.png";
+    img.alt = it.name || "NFT";
+
+    const meta = qCreate("div", "item-meta");
+    const title = qCreate("div", "item-title", escapeHtml(it.name));
+    const price = qCreate("div", "item-price", `<span class="accent">${Number(it.price).toFixed(2)} TON</span>`);
+    const owner = qCreate("div", "item-owner", `Owner: <span class="mono">${it.owner ? escapeHtml(it.owner.username || it.owner.telegram_id) : "—"}</span>`);
+
+    meta.appendChild(title);
+    meta.appendChild(price);
+    meta.appendChild(owner);
+
+    left.appendChild(img);
+    left.appendChild(meta);
+
+    const right = qCreate("div", "item-right");
+    const buy = qCreate("button", "btn btn-buy", "Приобрести");
+    buy.addEventListener("click", () => onBuyItem(it.id));
+    const more = qCreate("a", "link-more", "Подробнее");
+    more.href = it.link || "#";
+    more.target = "_blank";
+
+    right.appendChild(buy);
+    right.appendChild(more);
+
+    card.appendChild(left);
+    card.appendChild(right);
+    itemsNode.appendChild(card);
+  }
 }
 
 function renderGifts() {
-  $giftList.innerHTML = "";
-  if (!state.gifts || state.gifts.length === 0) {
-    $giftList.innerHTML = `<div style="padding:14px;color:#eee">У вас нет подарков</div>`;
+  clearNode(giftListNode);
+  if (!State.gifts || State.gifts.length === 0) {
+    giftListNode.appendChild(qCreate("div", "empty-note", "У вас пока нет подарков."));
     return;
   }
-  state.gifts.forEach(g => {
-    const div = document.createElement("div");
-    div.className = "gift-card";
-    div.innerHTML = `
-      <img src="${g.image_url || 'https://via.placeholder.com/120x120?text=GIFT'}" alt="${escapeHtml(g.nft_name)}"/>
-      <div style="flex:1">
-        <div style="font-weight:700">${escapeHtml(g.nft_name)}</div>
-        <div style="font-size:12px;color:#ffd8aa">Статус: ${escapeHtml(g.status || '')}</div>
-        <div style="margin-top:6px;font-size:13px"><a href="${g.nft_link}" target="_blank" style="color:#ffd866">${g.nft_link}</a></div>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <button class="list-btn" style="background:transparent;border:1px solid #ffd866;padding:6px;border-radius:8px;color:#ffd866">Выставить лот</button>
-      </div>
-    `;
-    const listBtn = div.querySelector(".list-btn");
-    listBtn.addEventListener("click", () => createLotFromGift(g));
-    $giftList.appendChild(div);
+  for (const g of State.gifts) {
+    const card = qCreate("div", "gift-card");
+    const img = qCreate("img", "gift-img");
+    img.src = g.image_url || "/images/placeholder-gift.png";
+    const meta = qCreate("div", "gift-meta");
+    meta.innerHTML = `<div class="gift-name">${escapeHtml(g.nft_name)}</div>
+                      <div class="gift-link"><a href="${g.nft_link}" target="_blank">${escapeHtml(g.nft_link)}</a></div>
+                      <div class="gift-status">Status: <span class="mono">${escapeHtml(g.status||"в наличии")}</span></div>`;
+    const actions = qCreate("div", "gift-actions");
+    const listBtn = qCreate("button", "btn btn-outline", "Выставить лот");
+    listBtn.addEventListener("click", () => onCreateLotFromGift(g));
+    actions.appendChild(listBtn);
+    card.appendChild(img);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    giftListNode.appendChild(card);
+  }
+}
+
+/* =======================
+   9. Load data from server
+   ======================= */
+async function loadItems() {
+  try {
+    const json = await apiFetch("/api/items");
+    State.items = json.items || [];
+    renderItems();
+  } catch (e) {
+    console.error("loadItems error", e);
+    itemsNode.innerHTML = "<div class='error'>Ошибка загрузки каталога</div>";
+  }
+}
+
+async function loadGiftsForUser() {
+  try {
+    if (!State.user) return;
+    const json = await apiFetch(`/api/gifts/${State.user.telegram_id}`);
+    State.gifts = json.gifts || [];
+    renderGifts();
+  } catch (e) {
+    console.error("loadGifts error", e);
+    giftListNode.innerHTML = "<div class='error'>Ошибка загрузки подарков</div>";
+  }
+}
+
+/* =======================
+   10. Purchase flow
+   ======================= */
+async function onBuyItem(itemId) {
+  if (!State.user) { alert("Войдите через Telegram, чтобы купить."); return; }
+  try {
+    const it = State.items.find(x => x.id === itemId);
+    if (!it) { alert("Товар не найден"); return; }
+    if (Number(State.user.balance) < Number(it.price)) { alert("Недостаточно средств"); return; }
+    const ok = confirm(`Купить ${it.name} за ${Number(it.price).toFixed(2)} TON? Комиссия 2%`);
+    if (!ok) return;
+    const res = await apiFetch("/api/buy", { method: "POST", body: { buyer_tg: State.user.telegram_id, item_id: itemId } });
+    if (res.success) {
+      await refreshAfterTx();
+      showToast("Покупка успешна 🎉");
+    } else {
+      alert("Ошибка покупки: " + (res.error || "unknown"));
+    }
+  } catch (e) {
+    console.error("buy error", e);
+    alert("Ошибка покупки: " + (e.message || e));
+  }
+}
+
+async function refreshAfterTx() {
+  // refresh user balance & data
+  try {
+    if (State.user) {
+      const bal = await apiFetch(`/api/balance/${State.user.telegram_id}`);
+      if (bal && typeof bal.balance !== "undefined") State.user.balance = bal.balance;
+    }
+    await loadItems();
+    await loadGiftsForUser();
+    renderBalance();
+  } catch (e) {
+    console.error("refreshAfterTx error", e);
+  }
+}
+
+/* =======================
+   11. Create lot from gift
+   ======================= */
+async function onCreateLotFromGift(gift) {
+  if (!State.user) { alert("Войдите через Telegram"); return; }
+  const priceStr = prompt("Укажи цену лота (TON). Комиссия 2% будет удержана при продаже.", "1.00");
+  if (!priceStr) return;
+  const price = Number(priceStr);
+  if (isNaN(price) || price <= 0) { alert("Некорректная цена"); return; }
+
+  try {
+    const res = await apiFetch("/api/items/new", {
+      method: "POST",
+      body: {
+        telegram_id: State.user.telegram_id,
+        name: gift.nft_name || "Gift",
+        description: `Лот из My Gifts: ${gift.nft_name}`,
+        price: price,
+        image: gift.image_url,
+        link: gift.nft_link
+      }
+    });
+    if (res.success) {
+      showToast("Лот выставлен успешно");
+      await loadItems();
+    } else {
+      alert("Ошибка выставления лота");
+    }
+  } catch (e) {
+    console.error("create lot error", e);
+    alert("Ошибка выставления лота: " + (e.message || e));
+  }
+}
+
+/* =======================
+   12. Admin: give balance
+   ======================= */
+if (giveBtn) {
+  giveBtn.addEventListener("click", async () => {
+    const target = (targetIdInput && targetIdInput.value) ? targetIdInput.value.trim() : null;
+    const amount = Number(amountInput && amountInput.value ? amountInput.value : 0);
+    if (!target || !amount || amount <= 0) { alert("Укажи корректный ID и сумму"); return; }
+    try {
+      const resp = await apiFetch("/api/admin/give", { method: "POST", body: { admin_id: tgUser ? tgUser.id : null, target_id: target, amount } });
+      if (resp.success) {
+        adminResultNode.innerText = `Выдано ${Number(amount).toFixed(2)} TON пользователю ${target}.`;
+        if (State.user && String(State.user.telegram_id) === String(target)) await refreshAfterTx();
+      } else {
+        adminResultNode.innerText = `Ошибка: ${resp.error || JSON.stringify(resp)}`;
+      }
+    } catch (e) {
+      console.error("admin give error", e);
+      adminResultNode.innerText = `Ошибка: ${e.message || e}`;
+    }
   });
 }
 
-/* ------------- Utility helpers ------------- */
-function escapeHtml(s) {
-  if (!s && s !== 0) return "";
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-function truncate(s, n) {
-  if (!s) return "";
-  return s.length > n ? s.slice(0, n-1) + "…" : s;
-}
-
-/* ------------- Buying flow ------------- */
-async function onBuyItem(itemId) {
+/* =======================
+   13. SSE realtime connection for new gifts + notifications
+   ======================= */
+function connectSSE() {
+  // open Server-Sent Events connection to backend /events
   try {
-    if (!state.user) {
-      alert("Войдите через Telegram, чтобы купить.");
-      return;
-    }
-    const item = state.items.find(i => i.id === itemId);
-    if (!item) { alert("Товар не найден"); return; }
-    const price = Number(item.price);
-    if (Number(state.user.balance) < price) {
-      alert("Недостаточно баланса");
-      return;
-    }
-    // Подтверждение покупки
-    const ok = confirm(`Купить «${item.name}» за ${price.toFixed(2)} TON? (Комиссия платформы 2%)`);
-    if (!ok) return;
-
-    // Вариант: вызываем backend /api/buy (без раскрытия ключа)
-    if (API_BASE) {
-      const json = await apiFetch("/api/buy", {
-        method: "POST",
-        body: { buyer_tg: state.user.telegram_id, item_id: itemId }
-      });
-      if (json.success) {
-        // Обновляем локально баланс и перечитываем данные
-        await refreshAfterTransaction();
-        alert("Покупка успешна!");
-      } else {
-        alert("Не удалось купить: " + (json.error || "Ошибка"));
-      }
-    } else {
-      // Прямая логика через Supabase REST (внимание: anon key должен позволять обновления)
-      // 1) Получим item (re-check)
-      const items = await supabaseFetch("GET", "items", null, `?id=eq.${itemId}`);
-      if (!items || items.length === 0) throw new Error("Item not found (re-check)");
-      const it = items[0];
-      // 2) buyer row
-      const buyers = await supabaseFetch("GET", "users", null, `?telegram_id=eq.${state.user.telegram_id}`);
-      if (!buyers || buyers.length === 0) throw new Error("Buyer not found");
-      const buyer = buyers[0];
-      if (Number(buyer.balance) < Number(it.price)) throw new Error("Insufficient balance");
-
-      // 3) seller
-      const sellers = await supabaseFetch("GET", "users", null, `?id=eq.${it.owner_id}`);
-      if (!sellers || sellers.length === 0) throw new Error("Seller not found");
-      const seller = sellers[0];
-
-      // 4) transaction: update balances and item owner, insert transactions row
-      const commission = Number(it.price) * 0.02;
-      const sellerGets = Number(it.price) - commission;
-      // Update buyer balance
-      await supabaseFetch("PATCH", "users", { balance: Number(buyer.balance) - Number(it.price) }, `?telegram_id=eq.${buyer.telegram_id}`);
-      // Update seller balance
-      await supabaseFetch("PATCH", "users", { balance: Number(seller.balance) + sellerGets }, `?id=eq.${seller.id}`);
-      // Update item owner
-      await supabaseFetch("PATCH", "items", { owner_id: buyer.id }, `?id=eq.${it.id}`);
-      // Insert transaction
-      await supabaseFetch("POST", "transactions", [{ buyer_id: buyer.id, seller_id: seller.id, item_id: it.id, amount: it.price }]);
-      await refreshAfterTransaction();
-      alert("Покупка успешна!");
-    }
-  } catch (e) {
-    console.error("onBuyItem error", e);
-    alert("Ошибка при покупке: " + (e.message || JSON.stringify(e)));
-  }
-}
-
-async function refreshAfterTransaction() {
-  // Перечитать данные: пользователь, товары, подарки
-  try {
-    if (API_BASE) {
-      const bal = await apiFetch(`/api/balance/${state.user.telegram_id}`);
-      if (bal && typeof bal.balance !== "undefined") {
-        state.user.balance = bal.balance;
-      }
-      await loadItems();
-      await loadGifts();
-      renderBalance();
-    } else {
-      // direct
-      const users = await supabaseFetch("GET", "users", null, `?telegram_id=eq.${state.user.telegram_id}`);
-      if (users && users.length > 0) state.user = users[0];
-      await loadItems();
-      await loadGifts();
-      renderBalance();
-    }
-  } catch (e) {
-    console.error("refreshAfterTransaction error", e);
-  }
-}
-
-/* ------------- Admin give balance ------------- */
-$giveBtn.addEventListener("click", async () => {
-  try {
-    const target = $targetIdInput.value.trim();
-    const amount = Number($amountInput.value);
-    if (!target || !amount || amount <= 0) { alert("Заполните корректно ID и сумму"); return; }
-    // Только admin (локальная проверка): если текущий tgUser.id !== OWNER_TELEGRAM_ID — бекенд вернёт 403
-    if (API_BASE) {
-      const resp = await apiFetch("/api/admin/give", {
-        method: "POST",
-        body: { admin_id: tgUser ? tgUser.id : null, target_id: target, amount }
-      });
-      if (resp && resp.success) {
-        $adminResult.innerText = `Выдано ${amount.toFixed(2)} TON пользователю ${target}. Новый баланс: ${resp.newBalance}`;
-      } else {
-        $adminResult.innerText = `Ошибка: ${JSON.stringify(resp)}`;
-      }
-    } else {
-      // direct supabase approach: find user by telegram_id
-      const users = await supabaseFetch("GET", "users", null, `?telegram_id=eq.${target}`);
-      if (!users || users.length === 0) { alert("Пользователь не найден"); return; }
-      const usr = users[0];
-      await supabaseFetch("PATCH", "users", { balance: Number(usr.balance) + amount }, `?telegram_id=eq.${target}`);
-      $adminResult.innerText = `Выдано ${amount.toFixed(2)} TON пользователю ${target}.`;
-    }
-    // если текущий пользователь — тот, кого пополнили, обновим баланс в UI
-    if (state.user && String(state.user.telegram_id) === String(target)) {
-      await refreshAfterTransaction();
-    }
-  } catch (e) {
-    console.error("admin give error", e);
-    $adminResult.innerText = `Ошибка: ${e.message || JSON.stringify(e)}`;
-  }
-});
-
-/* ------------- Create lot from gift (flow) ------------- */
-async function createLotFromGift(gift) {
-  try {
-    if (!state.user) { alert("Войдите через Telegram"); return; }
-    const priceStr = prompt("Укажите цену лота (TON) — комиссия 2% будет удержана при продаже", "1.00");
-    if (!priceStr) return;
-    const price = Number(priceStr);
-    if (isNaN(price) || price <= 0) { alert("Некорректная цена"); return; }
-
-    // Создадим item в items, owner = current user
-    if (API_BASE) {
-      const resp = await apiFetch("/api/items/new", {
-        method: "POST",
-        body: {
-          telegram_id: state.user.telegram_id,
-          name: gift.nft_name || "Gift",
-          description: `Лот из My Gifts: ${gift.nft_name}`,
-          price,
-          image: gift.image_url,
-          link: gift.nft_link
-        }
-      });
-      if (resp.success) {
-        alert("Лот выставлен");
-        await loadItems();
-      } else {
-        alert("Ошибка при выставлении лота");
-      }
-    } else {
-      // direct supabase insertion (owner_id = state.user.id)
-      await supabaseFetch("POST", "items", [{
-        name: gift.nft_name || "Gift",
-        description: `Лот из My Gifts: ${gift.nft_name}`,
-        price,
-        owner_id: state.user.id,
-        image: gift.image_url,
-        link: gift.nft_link
-      }]);
-      alert("Лот выставлен");
-      await loadItems();
-    }
-  } catch (e) {
-    console.error("createLotFromGift error", e);
-    alert("Ошибка при выставлении лота: " + (e.message || JSON.stringify(e)));
-  }
-}
-
-/* ------------- Init app ------------- */
-async function initApp() {
-  try {
-    // 1) auth front (create/get user)
-    await authFront();
-    // 2) load items + gifts
-    await loadItems();
-    await loadGifts();
-    // 3) render
-    renderBalance();
-    // 4) start animation
-    startScene();
-  } catch (e) {
-    console.error("initApp error", e);
-  }
-}
-initApp();
-
-/* =========================
-   CANVAS: stylized scene
-   ========================= */
-
-/* Canvas setup */
-const canvas = qs("#sunsetCanvas");
-const ctx = canvas.getContext("2d");
-let W = window.innerWidth;
-let H = window.innerHeight;
-canvas.width = W;
-canvas.height = H;
-
-/* Resize handling */
-function onResize() {
-  W = window.innerWidth;
-  H = window.innerHeight;
-  canvas.width = W;
-  canvas.height = H;
-}
-window.addEventListener("resize", onResize);
-
-/* Stylized scene parameters */
-const scene = {
-  time: 0,
-  birds: [],
-  ships: [],
-  duckCars: [],
-  clouds: [],
-  crane: {
-    x: W * 0.75,
-    y: H * 0.55,
-    armAngle: -0.6,
-    containerY: null,
-    containerState: "idle" // idle | down | up | hold
-  },
-  lastDuckSpawn: performance.now(),
-  lastShipSpawn: performance.now()
-};
-
-/* Utility randoms */
-function rand(min, max) { return Math.random() * (max - min) + min; }
-function randInt(min, max) { return Math.floor(rand(min, max + 1)); }
-
-/* Initialize birds, clouds */
-function seedScene() {
-  scene.birds = [];
-  const birdCount = Math.max(3, Math.floor(W / 240));
-  for (let i = 0; i < birdCount; i++) {
-    scene.birds.push({
-      x: rand(-W*0.2, W),
-      y: rand(H*0.05, H*0.25),
-      speed: rand(0.4, 1.3),
-      dir: Math.random() < 0.5 ? 1 : -1,
-      wingPhase: Math.random() * Math.PI*2
+    if (!!State.sse) State.sse.close();
+    const url = (API_BASE || "") + "/events";
+    const es = new EventSource(url, { withCredentials: true });
+    State.sse = es;
+    es.onopen = () => console.log("SSE connected");
+    es.onerror = (e) => {
+      console.warn("SSE error", e);
+      // try reconnect after delay
+      setTimeout(() => connectSSE(), 5000);
+    };
+    es.addEventListener("new_gift", (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        // data should include: gift row, to_telegram_id, from_telegram_id, from_username
+        handleIncomingGiftEvent(data);
+      } catch (e) { console.error("parse sse data", e); }
     });
-  }
-  scene.clouds = [];
-  const cloudCount = Math.max(3, Math.floor(W / 500));
-  for (let i=0;i<cloudCount;i++){
-    scene.clouds.push({
-      x: rand(0, W),
-      y: rand(H*0.02, H*0.20),
-      size: rand(80, 220),
-      speed: rand(0.05, 0.25)
+    es.addEventListener("new_lot", (ev) => {
+      console.log("new_lot", ev.data);
+      // optional: reload items
+      loadItems();
+      showToast("Новый лот появился в каталоге");
     });
-  }
-  scene.ships = [];
-  // initial ship might be none; spawn periodically via tick
-  scene.duckCars = [];
-  // crane initial container position (resting at top)
-  scene.crane.containerY = scene.crane.y - 60;
-}
-seedScene();
-
-/* Duck car spawn: each 30s one duck drives along arc */
-function spawnDuckCar() {
-  // duckCar object with startTime; path parameter t in [0,1]
-  const spawn = {
-    startTime: performance.now(),
-    duration: 30000, // 30 seconds for whole arc
-    spriteScale: rand(0.9, 1.1),
-    offsetY: rand(-20, 20),
-    color: "#ffd24a"
-  };
-  scene.duckCars.push(spawn);
-}
-
-/* Ship spawn: every 60s */
-function spawnShip() {
-  const spawn = {
-    startTime: performance.now(),
-    duration: 60000,
-    y: H*0.72 + rand(-6, 12),
-    speed: rand(0.2, 0.6),
-    width: rand(120, 240),
-    color: "#ff8aa3"
-  };
-  scene.ships.push(spawn);
-}
-
-/* Crane cycle: pick up and drop container every 18-28s */
-let craneTimer = performance.now() + rand(8000, 16000);
-function tryCraneCycle(now) {
-  if (now > craneTimer && scene.crane.containerState === "idle") {
-    scene.crane.containerState = "down";
-    craneTimer = now + rand(18000, 30000); // next cycle
+    // generic message
+    es.onmessage = function(e) {
+      // fallback: generic server messages
+      // console.log("SSE msg", e.data);
+    };
+  } catch (e) {
+    console.error("connectSSE failed", e);
   }
 }
 
-/* Background gradient: stylized yellow->purple sunset */
-function drawSky() {
-  const grd = ctx.createLinearGradient(0, 0, 0, H);
-  grd.addColorStop(0, "#fff2c9");
-  grd.addColorStop(0.25, "#ffd86f");
-  grd.addColorStop(0.6, "#9b4ff2");
-  grd.addColorStop(1, "#130026");
-  ctx.fillStyle = grd;
-  ctx.fillRect(0, 0, W, H);
+function handleIncomingGiftEvent(payload) {
+  // payload ex: { gift: {...}, to_telegram_id: "6828...", from_telegram_id: "...", from_username: "..." }
+  try {
+    // if gift is addressed to manager account (owner), we must add it to My Gifts of the sender OR add to manager's gifts?
+    // According to your earlier spec: when user sends collectible to manager (6828...), script automatically
+    // credits the sender's My Gifts (i.e., records that manager accepted and added gift to platform)
+    // But precise business logic can vary. Here we implement:
+    //  - if payload.to_telegram_id === OWNER_TELEGRAM_ID, then the server will have created a gift record with user_id = sender_id
+    //  - we will notify the sender (if current user is payload.from_telegram_id) and refresh their My Gifts.
+    const gift = payload.gift || payload;
+    showToast(`🎁 Получен новый подарок: ${gift.nft_name || "подарок"}`);
+    // If current user is the sender, refresh My Gifts (it might have been added)
+    if (State.user && String(State.user.telegram_id) === String(payload.from_telegram_id)) {
+      loadGiftsForUser();
+    }
+    // If current user is owner (manager), refresh owner's gifts
+    if (State.user && String(State.user.telegram_id) === String(OWNER_TELEGRAM_ID)) {
+      loadGiftsForUser();
+    }
+    // Optionally: add to local list
+    // State.gifts.unshift(gift);
+    // renderGifts();
+  } catch (e) {
+    console.error("handleIncomingGiftEvent error", e);
+  }
 }
 
-/* Sun with occasional rays flash */
-let lastSunFlash = 0;
-function drawSun(now) {
-  const sunX = W * 0.15;
-  const sunY = H * 0.18;
-  const r = Math.min(W, H) * 0.08;
-  // subtle pulsing
-  const pulse = 1 + 0.03 * Math.sin(now / 600);
-  ctx.save();
-  // glow
-  const g = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, r*3);
-  g.addColorStop(0, "rgba(255,241,163,0.9)");
-  g.addColorStop(0.4, "rgba(255,194,87,0.45)");
-  g.addColorStop(1, "rgba(158,89,255,0.0)");
-  ctx.fillStyle = g;
-  ctx.beginPath();
-  ctx.arc(sunX, sunY, r*3, 0, Math.PI*2);
-  ctx.fill();
+/* =======================
+   14. Toast / Notifications
+   ======================= */
+const toastsRoot = (function createToasts() {
+  let root = $("#porthub-toasts");
+  if (!root) {
+    root = qCreate("div", "porthub-toasts");
+    root.id = "porthub-toasts";
+    document.body.appendChild(root);
+  }
+  return root;
+})();
 
-  // disc
-  ctx.beginPath();
-  ctx.fillStyle = "#fff6c6";
-  ctx.arc(sunX, sunY, r * pulse, 0, Math.PI*2);
-  ctx.fill();
+function showToast(text, timeout = 3500) {
+  const s = qCreate("div", "ph-toast", text);
+  toastsRoot.appendChild(s);
+  requestAnimationFrame(() => s.classList.add("visible"));
+  setTimeout(() => {
+    s.classList.remove("visible");
+    setTimeout(() => {
+      try { toastsRoot.removeChild(s); } catch (e) {}
+    }, 400);
+  }, timeout);
+}
 
-  // optional rays (rare)
-  if (Math.random() < 0.002 || (now - lastSunFlash) > 12000 && Math.random() < 0.05) {
-    lastSunFlash = now;
-    // animate rays: draw a set of translucent rays
-    for (let i = 0; i < 9; i++) {
+/* =======================
+   15. Init sequence
+   ======================= */
+async function init() {
+  // 1) populate UI fonts & styles (we already loaded fonts)
+  // 2) auth front
+  await frontAuth();
+  // 3) load items + gifts
+  await loadItems();
+  await loadGiftsForUser();
+  // 4) connect SSE
+  connectSSE();
+  // 5) canvas starts below
+  startCanvas();
+  // 6) initial render
+  renderBalance();
+}
+
+init();
+
+/* =======================
+   16. CANVAS section — stylized, performant, modern
+   ======================= */
+
+(function canvasModule() {
+  // Create and manage full-screen canvas background with stylized "stylized" art:
+  // - top: sun + birds (light shapes)
+  // - mid: sea + bridge + ship
+  // - foreground: curved road arc + duck-car moving per schedule
+  // - right/mid: port crane with animated container
+
+  const canvas = document.getElementById("sunsetCanvas") || (function () {
+    const c = document.createElement("canvas");
+    c.id = "sunsetCanvas";
+    c.style.position = "fixed";
+    c.style.top = 0;
+    c.style.left = 0;
+    c.style.width = "100%";
+    c.style.height = "100%";
+    c.style.zIndex = 0;
+    c.style.pointerEvents = "none";
+    document.body.insertBefore(c, document.body.firstChild);
+    return c;
+  })();
+
+  const ctx = canvas.getContext("2d", { alpha: false });
+
+  let W = innerWidth, H = innerHeight;
+  function resize() {
+    W = innerWidth; H = innerHeight;
+    const DPR = window.devicePixelRatio || 1;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener("resize", () => { resize(); seedScene(); });
+  resize();
+
+  // Scene state
+  const scene = {
+    t: 0,
+    birds: [],
+    ships: [],
+    clouds: [],
+    duckCars: [],
+    lastDuck: 0,
+    lastShip: 0,
+    crane: { x: Math.round(W * 0.75), y: Math.round(H * 0.64), containerY: -60, state: "idle", armAngle: -0.55 },
+  };
+
+  // palette (premium)
+  const color = {
+    skyTop: "#5e3bdb",
+    skyMid: "#ffb84d",
+    skyBottom: "#1b043e",
+    seaTop: "#2a1a59",
+    seaBottom: "#0b0020",
+    road: "#20102d",
+    roadLine: "#ffdf5a",
+    accent: "#ffd966",
+    text: "#ffffff"
+  };
+
+  // seed birds/clouds
+  function seedScene() {
+    scene.birds = [];
+    scene.clouds = [];
+    scene.ships = [];
+    scene.duckCars = [];
+    scene.lastDuck = performance.now();
+    scene.lastShip = performance.now();
+    const birdN = Math.max(3, Math.floor(W / 320));
+    for (let i=0;i<birdN;i++){
+      scene.birds.push({
+        x: Math.random()*W,
+        y: rand(H*0.05, H*0.25),
+        dir: Math.random() > 0.5 ? 1 : -1,
+        speed: rand(0.3, 1.3),
+        phase: Math.random()*Math.PI*2
+      });
+    }
+    const cloudN = Math.max(2, Math.floor(W/420));
+    for (let i=0;i<cloudN;i++){
+      scene.clouds.push({ x: Math.random()*W, y: rand(20, H*0.18), size: rand(80,200), speed: rand(0.02,0.15) });
+    }
+  }
+  seedScene();
+
+  function rand(a,b){return Math.random()*(b-a)+a;}
+  function randInt(a,b){return Math.floor(rand(a,b+1));}
+
+  // spawn duck every 30s
+  function maybeSpawnDuck(now) {
+    if (now - scene.lastDuck > 30000) {
+      scene.lastDuck = now;
+      scene.duckCars.push({ start: now, dur: 30000, scale: rand(0.92,1.06) });
+    }
+  }
+  // spawn ship every 60s
+  function maybeSpawnShip(now) {
+    if (now - scene.lastShip > 60000) {
+      scene.lastShip = now;
+      scene.ships.push({ start: now, dur: 60000, y: H*0.74 + rand(-6,14), w: rand(120,240) });
+    }
+  }
+
+  // draw sky gradient
+  function drawSky(t) {
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0, color.skyTop);
+    g.addColorStop(0.35, color.skyMid);
+    g.addColorStop(1, color.skyBottom);
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,H);
+  }
+
+  // sun
+  let lastSunFlash = 0;
+  function drawSun(t) {
+    const sx = W*0.14;
+    const sy = H*0.16;
+    const r = Math.min(W,H)*0.07;
+    // glow
+    const g = ctx.createRadialGradient(sx,sy,r*0.2,sx,sy,r*3);
+    g.addColorStop(0, "rgba(255,244,200,0.9)");
+    g.addColorStop(0.4, "rgba(255,190,80,0.45)");
+    g.addColorStop(1, "rgba(150,80,255,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(sx,sy,r*2,0,Math.PI*2); ctx.fill();
+    // disc
+    ctx.beginPath(); ctx.fillStyle = "#fff0c6"; ctx.arc(sx,sy,r*0.9,0,Math.PI*2); ctx.fill();
+
+    // rare rays
+    if (Math.random() < 0.002 || (t - lastSunFlash > 10000 && Math.random()<0.06)) {
+      lastSunFlash = t;
+      for (let i=0;i<8;i++){
+        ctx.beginPath();
+        ctx.moveTo(sx,sy);
+        const ang = (i/8)*Math.PI*2 + Math.random()*0.15;
+        ctx.lineTo(sx + Math.cos(ang)*(r*3.5), sy + Math.sin(ang)*(r*3.5));
+        ctx.strokeStyle = "rgba(255,234,145,0.05)";
+        ctx.lineWidth = 14;
+        ctx.stroke();
+      }
+    }
+  }
+
+  // clouds & birds
+  function drawClouds(t, dt) {
+    for (const c of scene.clouds) {
+      c.x += c.speed * dt * 0.06;
+      if (c.x > W + c.size) c.x = -c.size;
       ctx.beginPath();
-      ctx.moveTo(sunX, sunY);
-      const ang = (i / 9) * Math.PI * 2 + Math.random()*0.2;
-      const lx = sunX + Math.cos(ang) * r * 4;
-      const ly = sunY + Math.sin(ang) * r * 4;
-      ctx.lineTo(lx, ly);
-      ctx.strokeStyle = "rgba(255,234,145,0.06)";
-      ctx.lineWidth = 18;
+      ctx.fillStyle = "rgba(255,255,255,0.08)";
+      ctx.ellipse(c.x, c.y, c.size*0.7, c.size*0.36, 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(c.x + c.size*0.36, c.y+6, c.size*0.55, c.size*0.28, 0,0,Math.PI*2);
+      ctx.fill();
+    }
+    // birds
+    for (const b of scene.birds) {
+      b.x += b.dir * b.speed * dt * 0.04;
+      b.phase += dt*0.003*b.speed;
+      if (b.dir > 0 && b.x > W + 80) b.x = -80;
+      if (b.dir < 0 && b.x < -80) b.x = W + 80;
+      const wing = Math.sin(b.phase) * 6;
+      ctx.beginPath();
+      ctx.strokeStyle = "#fff8c8";
+      ctx.lineWidth = 2;
+      ctx.moveTo(b.x, b.y);
+      ctx.lineTo(b.x - 20*b.dir, b.y - 8 + wing);
+      ctx.lineTo(b.x - 36*b.dir, b.y - 2);
       ctx.stroke();
     }
   }
-  ctx.restore();
-}
 
-/* Birds draw */
-function updateAndDrawBirds(dt) {
-  ctx.save();
-  scene.birds.forEach(b => {
-    b.wingPhase += dt * 0.02 * b.speed;
-    b.x += b.dir * b.speed * dt * 0.03;
-    // wrap
-    if (b.dir > 0 && b.x > W + 60) b.x = -60;
-    if (b.dir < 0 && b.x < -60) b.x = W + 60;
-    // draw stylized bird (V shape)
+  // sea
+  function drawSea(t) {
+    const sy = H * 0.68;
+    const g = ctx.createLinearGradient(0, sy, 0, H);
+    g.addColorStop(0, color.seaTop);
+    g.addColorStop(1, color.seaBottom);
+    ctx.fillStyle = g; ctx.fillRect(0, sy, W, H-sy);
+
+    // gentle waves
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    for (let i=0;i<4;i++){
+      ctx.beginPath();
+      const amp = 4 + i*2;
+      const freq = 0.0025 + i*0.0008;
+      ctx.moveTo(0, sy + i*12);
+      for (let x = 0; x <= W; x += 12) {
+        const y = sy + i*12 + Math.sin(t*0.002 + x*freq + i)*amp;
+        ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = ["#ffd7a9","#ffc08a","#ff9fb2","#caa1ff"][i%4];
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // bridge silhouette
+  function drawBridge() {
+    const by = H*0.56;
+    ctx.save();
+    ctx.fillStyle = "rgba(10,6,22,0.9)";
+    ctx.fillRect(0, by-8, W, 14);
+    const archCount = 6;
+    for (let i=0;i<archCount;i++){
+      const x = (i/archCount)*W;
+      ctx.beginPath();
+      ctx.ellipse(x+W/archCount/2, by+6, W/archCount/2.6, 22, 0, 0, Math.PI);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // road (curved)
+  function drawRoad(t) {
+    const top = H*0.78;
+    ctx.save();
     ctx.beginPath();
-    const wing = Math.sin(b.wingPhase) * 6;
-    ctx.moveTo(b.x, b.y);
-    ctx.lineTo(b.x - 16 * b.dir, b.y - 8 + wing);
-    ctx.lineTo(b.x - 28 * b.dir, b.y - 2);
-    ctx.strokeStyle = "#fff7d8";
-    ctx.lineWidth = 2;
-    ctx.lineCap = "round";
+    ctx.moveTo(-W*0.2, top);
+    ctx.quadraticCurveTo(W*0.5, H*0.52, W*1.2, top);
+    ctx.lineTo(W*1.2, H); ctx.lineTo(-W*0.2, H); ctx.closePath();
+    ctx.fillStyle = color.road; ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(-W*0.2, top+18);
+    ctx.quadraticCurveTo(W*0.5, H*0.545, W*1.2, top+18);
+    ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 6; ctx.stroke();
+
+    // dashed center line
+    ctx.save();
+    ctx.setLineDash([38, 28]);
+    ctx.lineDashOffset = -(t*0.02);
+    ctx.beginPath();
+    ctx.moveTo(-W*0.2, top+9);
+    ctx.quadraticCurveTo(W*0.5, H*0.535, W*1.2, top+9);
+    ctx.strokeStyle = color.roadLine;
+    ctx.lineWidth = 6;
     ctx.stroke();
-  });
-  ctx.restore();
-}
+    ctx.restore();
+    ctx.restore();
+  }
 
-/* Clouds draw */
-function updateAndDrawClouds(dt) {
-  ctx.save();
-  scene.clouds.forEach(c => {
-    c.x += c.speed * dt * 0.02;
-    if (c.x > W + c.size) c.x = -c.size;
-    // draw a simple cloud using circles
-    const y = c.y;
+  // arc path mapping t->pos
+  function arcPath(t) {
+    const P0 = {x:-W*0.2, y:H*0.78+9};
+    const P1 = {x:W*0.5, y:H*0.52+6};
+    const P2 = {x:W*1.2, y:H*0.78+9};
+    const x = (1-t)*(1-t)*P0.x + 2*(1-t)*t*P1.x + t*t*P2.x;
+    const y = (1-t)*(1-t)*P0.y + 2*(1-t)*t*P1.y + t*t*P2.y;
+    return {x,y};
+  }
+
+  // draw duck car
+  function drawDuck(d, now) {
+    const elapsed = now - d.start;
+    const rawT = Math.min(1, elapsed / d.dur);
+    const ease = rawT < 0.5 ? 2*rawT*rawT : -1 + (4 - 2*rawT)*rawT;
+    const pos = arcPath(ease);
+    const bob = Math.sin(elapsed/600 * Math.PI*2)*4;
+    ctx.save();
+    ctx.translate(pos.x, pos.y + bob);
+    ctx.scale(d.scale, d.scale);
+
+    // shadow
     ctx.beginPath();
-    ctx.fillStyle = "rgba(255,255,255,0.08)";
-    ctx.ellipse(c.x, y, c.size*0.6, c.size*0.35, 0, 0, Math.PI*2);
-    ctx.ellipse(c.x + c.size*0.35, y + 6, c.size*0.5, c.size*0.3, 0, 0, Math.PI*2);
-    ctx.ellipse(c.x - c.size*0.28, y + 3, c.size*0.45, c.size*0.28, 0, 0, Math.PI*2);
+    ctx.ellipse(0, 26, 46, 12, 0,0,Math.PI*2);
+    ctx.fillStyle = "rgba(0,0,0,0.12)"; ctx.fill();
+
+    // body
+    roundRect(ctx, -48, -6, 96, 28, 9);
+    ctx.fillStyle = "#ffd24a"; ctx.fill();
+
+    // roof
+    roundRect(ctx, -22, -20, 44, 18, 6); ctx.fillStyle = "#ffd86f"; ctx.fill();
+
+    // windows (sunglasses)
+    ctx.beginPath(); ctx.rect(-14, -18, 28, 12); ctx.fillStyle = "#201726"; ctx.fill();
+
+    // wheels
+    ctx.beginPath(); ctx.arc(-26,18,8,0,Math.PI*2); ctx.arc(26,18,8,0,Math.PI*2); ctx.fillStyle = "#100b12"; ctx.fill();
+
+    // beak front
+    ctx.beginPath(); ctx.moveTo(48, -2); ctx.lineTo(62,0); ctx.lineTo(48,8); ctx.fillStyle="#ffb84d"; ctx.fill();
+
+    ctx.restore();
+  }
+
+  // draw ship
+  function drawShip(s, now) {
+    const elapsed = now - s.start;
+    const t = (elapsed % s.dur) / s.dur;
+    const x = -s.w + (W + s.w*2) * t;
+    const y = s.y;
+    ctx.save();
+    ctx.translate(x, y);
+    // hull
+    ctx.beginPath();
+    ctx.moveTo(0, 18); ctx.lineTo(s.w*0.85,18);
+    ctx.quadraticCurveTo(s.w*0.95,18,s.w,10); ctx.lineTo(s.w,-8); ctx.lineTo(0,-8); ctx.closePath();
+    ctx.fillStyle = "#ffccd6"; ctx.fill();
+
+    // cabin
+    ctx.fillStyle = "rgba(255,255,255,0.9)"; ctx.fillRect(s.w*0.15, -20, s.w*0.32, 12);
+
+    // smokestack
+    ctx.fillStyle = "#d14f8a"; ctx.fillRect(s.w*0.55, -26, 10, 14);
+    ctx.restore();
+  }
+
+  // crane draw & logic
+  function updateDrawCrane(now, dt) {
+    const cr = scene.crane;
+    cr.x = Math.round(W*0.76);
+    cr.y = Math.round(H*0.64);
+    // base
+    ctx.save();
+    ctx.translate(cr.x, cr.y);
+    ctx.fillStyle = "#32183a";
+    roundRect(ctx, -12, 0, 24, 60, 6);
+    // arm
+    cr.armAngle = -0.6 + Math.sin(now/4200)*0.01;
+    ctx.save();
+    ctx.rotate(cr.armAngle);
+    roundRect(ctx, 0, -6, 200, 12, 6); ctx.fillStyle = "#3a2150"; ctx.fill();
+    // cable & container
+    const cableX = 180;
+    if (!cr.state || cr.state==="idle") {
+      // occasionally lower
+      if (Math.random() < 0.0008) cr.state = "down";
+    }
+    if (cr.state === "down") {
+      cr.containerY = (cr.containerY === undefined ? -60 : cr.containerY) + dt*0.06;
+      if (cr.containerY > 40) { cr.state = "hold"; setTimeout(()=>{ cr.state="up"; }, 1400); }
+    } else if (cr.state === "up") {
+      cr.containerY -= dt*0.04;
+      if (cr.containerY < -60) { cr.state="idle"; cr.containerY=-60; }
+    } else {
+      if (cr.containerY === undefined) cr.containerY = -60;
+    }
+    ctx.beginPath(); ctx.moveTo(cableX,0); ctx.lineTo(cableX, cr.containerY); ctx.strokeStyle="#1b1320"; ctx.lineWidth=2; ctx.stroke();
+    ctx.fillStyle = "#ff5757"; roundRect(ctx, cableX-18, cr.containerY, 36, 22, 3);
+    ctx.restore();
+    ctx.restore();
+  }
+
+  // helper round rect
+  function roundRect(ctx, x, y, w, h, r) {
+    if (w < 2*r) r = w/2; if (h < 2*r) r = h/2;
+    ctx.beginPath();
+    ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
     ctx.fill();
-  });
-  ctx.restore();
-}
+  }
 
-/* Stylized sea with waves */
-function drawSea(now) {
-  const seaTop = H * 0.68;
-  // gradient sea
-  const g = ctx.createLinearGradient(0, seaTop, 0, H);
-  g.addColorStop(0, "#35185a");
-  g.addColorStop(1, "#0a0030");
-  ctx.fillStyle = g;
-  ctx.fillRect(0, seaTop, W, H - seaTop);
-
-  // simple wave lines
-  ctx.save();
-  ctx.globalAlpha = 0.25;
-  for (let i = 0; i < 4; i++) {
-    ctx.beginPath();
-    const amp = 6 + i * 3;
-    const freq = 0.002 + i * 0.0012;
-    ctx.moveTo(0, seaTop + 12*i);
-    for (let x = 0; x <= W; x += 10) {
-      const y = seaTop + 12*i + Math.sin((now * 0.002 + x * freq) + i) * amp;
-      ctx.lineTo(x, y);
+  // main loop
+  let last = performance.now();
+  function loop(now) {
+    const dt = now - last;
+    last = now;
+    if (!State.animPaused) {
+      draw(now, dt);
     }
-    ctx.strokeStyle = ["#ffd8a6","#ffb36a","#ff9bb2","#c89aff"][i] || "#fff";
-    ctx.lineWidth = 1;
-    ctx.stroke();
+    requestAnimationFrame(loop);
   }
-  ctx.restore();
-}
 
-/* Bridge draw (silhouette) */
-function drawBridge() {
-  const bridgeY = H * 0.56;
-  ctx.save();
-  ctx.fillStyle = "rgba(8,4,22,0.85)";
-  ctx.fillRect(0, bridgeY - 8, W, 14);
-  // draw arches
-  const archCount = 6;
-  for (let i=0;i<archCount;i++){
-    const x = (i / archCount) * W;
-    ctx.beginPath();
-    ctx.ellipse(x + W/archCount/2, bridgeY+6, W/archCount/2.6, 22, 0, 0, Math.PI);
-    ctx.fillStyle = "rgba(8,4,22,0.9)";
-    ctx.fill();
-  }
-  ctx.restore();
-}
-
-/* Road arc draw: stylized curve across the scene (foreground) */
-function drawRoad(now) {
-  // Road is an arc; we'll draw an exaggerated curve across bottom half
-  const roadTop = H * 0.78;
-  ctx.save();
-  // base
-  ctx.beginPath();
-  ctx.moveTo(-W * 0.2, roadTop);
-  ctx.quadraticCurveTo(W * 0.5, H * 0.52, W * 1.2, roadTop);
-  ctx.lineTo(W * 1.2, H);
-  ctx.lineTo(-W * 0.2, H);
-  ctx.closePath();
-  ctx.fillStyle = "#221522";
-  ctx.fill();
-
-  // road outline strip
-  ctx.beginPath();
-  ctx.moveTo(-W * 0.2, roadTop + 18);
-  ctx.quadraticCurveTo(W * 0.5, H * 0.545, W * 1.2, roadTop + 18);
-  ctx.strokeStyle = "#1c0f18";
-  ctx.lineWidth = 6;
-  ctx.stroke();
-
-  // dashed center line
-  ctx.save();
-  ctx.setLineDash([40, 30]);
-  ctx.lineDashOffset = -(now * 0.02);
-  ctx.beginPath();
-  ctx.moveTo(-W * 0.2, roadTop + 9);
-  ctx.quadraticCurveTo(W * 0.5, H * 0.535, W * 1.2, roadTop + 9);
-  ctx.strokeStyle = "#ffd86f";
-  ctx.lineWidth = 6;
-  ctx.stroke();
-  ctx.restore();
-
-  ctx.restore();
-}
-
-/* Path along arc: bilinear mapping - param t in [0,1] -> (x,y) */
-function arcPath(t) {
-  // Quadratic Bezier: P0 -> P1 -> P2
-  const P0 = { x: -W * 0.2, y: H * 0.78 + 9 };
-  const P1 = { x: W * 0.5, y: H * 0.52 + 6 };
-  const P2 = { x: W * 1.2, y: H * 0.78 + 9 };
-
-  // Quadratic Bezier formula
-  const x = (1 - t) * (1 - t) * P0.x + 2 * (1 - t) * t * P1.x + t * t * P2.x;
-  const y = (1 - t) * (1 - t) * P0.y + 2 * (1 - t) * t * P1.y + t * t * P2.y;
-  return { x, y };
-}
-
-/* Duck car draw: stylized yellow car with sunglasses (very simple) */
-function drawDuckCarInstance(inst, now) {
-  const elapsed = now - inst.startTime;
-  const t = Math.min(1, elapsed / inst.duration);
-  // ease in-out quad
-  const ease = t < 0.5 ? 2*t*t : -1 + (4 - 2*t)*t;
-  const pos = arcPath(ease);
-  // slight bob
-  const bob = Math.sin((elapsed / 600) * Math.PI*2) * 4 + inst.offsetY;
-
-  // car body
-  ctx.save();
-  ctx.translate(pos.x, pos.y + bob);
-  ctx.scale(inst.spriteScale, inst.spriteScale);
-  // shadow
-  ctx.beginPath();
-  ctx.ellipse(0, 26, 46, 12, 0, 0, Math.PI*2);
-  ctx.fillStyle = "rgba(0,0,0,0.18)";
-  ctx.fill();
-
-  // car
-  ctx.beginPath();
-  roundRect(ctx, -48, -6, 96, 28, 8);
-  ctx.fillStyle = inst.color;
-  ctx.fill();
-
-  // roof
-  ctx.beginPath();
-  roundRect(ctx, -22, -20, 44, 18, 6);
-  ctx.fillStyle = "#ffd06c";
-  ctx.fill();
-
-  // windows (sunglasses)
-  ctx.beginPath();
-  ctx.rect(-14, -18, 28, 12);
-  ctx.fillStyle = "#201a2b";
-  ctx.fill();
-
-  // wheels
-  ctx.beginPath();
-  ctx.arc(-26, 18, 8, 0, Math.PI*2);
-  ctx.arc(26, 18, 8, 0, Math.PI*2);
-  ctx.fillStyle = "#0e0b10";
-  ctx.fill();
-
-  // duck beak (front)
-  ctx.beginPath();
-  ctx.moveTo(48, -2);
-  ctx.lineTo(62, 0);
-  ctx.lineTo(48, 8);
-  ctx.fillStyle = "#ffd24a";
-  ctx.fill();
-
-  // little decal
-  ctx.beginPath();
-  ctx.rect(-46, -4, 8, 6);
-  ctx.fillStyle = "#ff5a9e";
-  ctx.fill();
-
-  ctx.restore();
-}
-
-/* Ship draw */
-function drawShipInstance(ship, now) {
-  const elapsed = now - ship.startTime;
-  const t = (elapsed % ship.duration) / ship.duration;
-  // ship moves left to right
-  const x = -ship.width + (W + ship.width*2) * t;
-  const y = ship.y;
-  ctx.save();
-  ctx.translate(x, y);
-  // hull
-  ctx.beginPath();
-  ctx.moveTo(0, 18);
-  ctx.lineTo(ship.width * 0.85, 18);
-  ctx.quadraticCurveTo(ship.width * 0.95, 18, ship.width, 10);
-  ctx.lineTo(ship.width, -8);
-  ctx.lineTo(0, -8);
-  ctx.closePath();
-  ctx.fillStyle = "#ffcad6";
-  ctx.fill();
-
-  // cabin
-  ctx.beginPath();
-  ctx.rect(ship.width * 0.15, -20, ship.width * 0.32, 12);
-  ctx.fillStyle = "#ffffffaa";
-  ctx.fill();
-
-  // smokestack
-  ctx.beginPath();
-  ctx.rect(ship.width * 0.55, -26, 10, 14);
-  ctx.fillStyle = "#d14f8a";
-  ctx.fill();
-
-  // small flag
-  ctx.beginPath();
-  ctx.moveTo(ship.width - 6, -28);
-  ctx.lineTo(ship.width + 10, -22);
-  ctx.lineTo(ship.width - 6, -16);
-  ctx.fillStyle = "#ffd86f";
-  ctx.fill();
-
-  ctx.restore();
-}
-
-/* Crane draw and container logic */
-function updateAndDrawCrane(now, dt) {
-  const cr = scene.crane;
-  ctx.save();
-  // crane base
-  const baseX = cr.x;
-  const baseY = cr.y;
-  ctx.translate(baseX, baseY);
-  // support
-  ctx.beginPath();
-  ctx.moveTo(-6, 0);
-  ctx.lineTo(-12, 60);
-  ctx.lineTo(12, 60);
-  ctx.lineTo(6, 0);
-  ctx.closePath();
-  ctx.fillStyle = "#2b1732";
-  ctx.fill();
-
-  // arm
-  cr.armAngle += Math.sin(now/4000) * 0.0006; // tiny sway
-  ctx.save();
-  ctx.rotate(cr.armAngle);
-  ctx.fillStyle = "#3a2143";
-  roundRect(ctx, 0, -6, 220, 12, 6);
-  // cable
-  const cableX = 200;
-  let contY = cr.containerY || ( -60 );
-  if (cr.containerState === "down") {
-    // lower container until near sea then hold
-    cr.containerY = (cr.containerY === null) ? -60 : cr.containerY;
-    cr.containerY += dt * 0.06;
-    if (cr.containerY > 40) {
-      cr.containerState = "hold";
-      // after hold, raise
-      setTimeout(()=>{ cr.containerState = "up"; }, 1600);
+  function draw(now, dt) {
+    scene.t = now;
+    // background
+    drawSky(now);
+    drawSun(now);
+    drawClouds(now, dt);
+    drawSea(now);
+    drawBridge();
+    drawRoad(now);
+    // ships behind road
+    for (let i = scene.ships.length - 1; i >= 0; i--) {
+      const s = scene.ships[i];
+      drawShip(s, now);
+      if (now - s.start > s.dur + 5000) scene.ships.splice(i,1);
     }
-    contY = cr.containerY;
-  } else if (cr.containerState === "up") {
-    cr.containerY -= dt * 0.04;
-    if (cr.containerY < -60) {
-      cr.containerState = "idle";
-      cr.containerY = -60;
+    updateDrawCrane(now, dt);
+
+    // ducks (foreground)
+    for (let i = scene.duckCars.length - 1; i >= 0; i--) {
+      const d = scene.duckCars[i];
+      drawDuck(d, now);
+      if (now - d.start > d.dur + 4000) scene.duckCars.splice(i,1);
     }
-    contY = cr.containerY;
-  } else {
-    // idle
-    if (cr.containerY === null) cr.containerY = -60;
-    contY = cr.containerY;
-  }
-  ctx.beginPath();
-  ctx.moveTo(cableX, 0);
-  ctx.lineTo(cableX, contY);
-  ctx.strokeStyle = "#1f1b26";
-  ctx.lineWidth = 2;
-  ctx.stroke();
 
-  // container
-  ctx.fillStyle = "#ff6b6b";
-  roundRect(ctx, cableX - 18, contY, 36, 22, 3);
-  ctx.restore();
-  ctx.restore();
-}
+    // maybe spawn
+    maybeSpawnDuck(now);
+    maybeSpawnShip(now);
 
-/* Helper: rounded rect */
-function roundRect(ctx, x, y, w, h, r) {
-  if (w < 2 * r) r = w / 2;
-  if (h < 2 * r) r = h / 2;
-  ctx.beginPath();
-  ctx.moveTo(x+r, y);
-  ctx.arcTo(x+w, y,   x+w, y+h, r);
-  ctx.arcTo(x+w, y+h, x,   y+h, r);
-  ctx.arcTo(x,   y+h, x,   y,   r);
-  ctx.arcTo(x,   y,   x+w, y,   r);
-  ctx.closePath();
-}
-
-/* Main render loop */
-let lastFrame = performance.now();
-function tick(now) {
-  const dt = now - lastFrame;
-  lastFrame = now;
-  scene.time += dt;
-
-  // spawn duck every 30s
-  if (now - scene.lastDuckSpawn > 30000) {
-    scene.lastDuckSpawn = now;
-    spawnDuckCar();
-  }
-  // spawn ship every 60s
-  if (now - scene.lastShipSpawn > 60000) {
-    scene.lastShipSpawn = now;
-    spawnShip();
+    // shimmer
+    ctx.save(); ctx.globalAlpha = 0.06; ctx.fillStyle = "#ffffff"; ctx.fillRect(0, H*0.76, W, H*0.24); ctx.restore();
   }
 
-  // crane cycles
-  tryCraneCycle(now);
+  // start
+  requestAnimationFrame(loop);
 
-  // background
-  drawSky();
-  updateAndDrawBirds(dt);
-  updateAndDrawClouds(dt);
-  drawSun(now);
-  drawSea(now);
-  drawBridge();
-  drawRoad(now);
+  // convenience: expose stop/start
+  window.porthubPause = () => { State.animPaused = true; };
+  window.porthubResume = () => { State.animPaused = false; };
 
-  // ships (behind road but above sea)
-  for (let i = scene.ships.length - 1; i >= 0; i--) {
-    const s = scene.ships[i];
-    drawShipInstance(s, now);
-    // remove old ships if too old
-    if (now - s.startTime > s.duration + 5000) {
-      scene.ships.splice(i, 1);
-    }
+})(); // end canvasModule
+
+/* =======================
+   17. STYLES: inject minimal UI CSS for pro look (inputs same color as bg slightly darker)
+   ======================= */
+(function injectStyles(){
+  const css = `
+  /* --- global app UI styles (professional) --- */
+  .app {
+    position: relative;
+    z-index: 10;
+    margin: 4vh auto;
+    width: min(420px, 94%);
+    padding: 18px;
+    border-radius: 18px;
+    background: linear-gradient(180deg, rgba(8,4,20,0.45), rgba(6,4,14,0.35));
+    box-shadow: 0 8px 40px rgba(10,8,20,0.6);
+    backdrop-filter: blur(8px) saturate(1.1);
+    color: var(--ph-text, #fff);
+    font-family: 'Inter', 'Poppins', system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
   }
-
-  // crane and container
-  updateAndDrawCrane(now, dt);
-
-  // duck cars (in front)
-  for (let i = scene.duckCars.length - 1; i >= 0; i--) {
-    const d = scene.duckCars[i];
-    drawDuckCarInstance(d, now);
-    if (now - d.startTime > d.duration + 4000) {
-      scene.duckCars.splice(i, 1);
-    }
+  header h1 { font-family: 'Poppins', 'Inter'; font-weight:800; font-size:28px; margin:0; letter-spacing:0.6px;
+    background: linear-gradient(90deg, #ffd966, #ff5aa3); -webkit-background-clip:text; -webkit-text-fill-color:transparent;
   }
+  header .subtitle { color: rgba(255,230,210,0.85); font-size:12px; margin-bottom:8px; }
+  #balance { color:#ffd966; font-weight:600; margin-top:6px; }
 
-  // small foreground shimmer
-  ctx.save();
-  ctx.globalAlpha = 0.06;
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, H*0.76, W, H*0.24);
-  ctx.restore();
+  nav { display:flex; gap:8px; margin: 10px 0 14px; }
+  .tab-btn { flex:1; padding:8px 10px; border-radius:10px; border:none; cursor:pointer; font-weight:700; font-size:13px; color:#fff; background: rgba(255,255,255,0.04); }
+  .tab-btn.active { background: linear-gradient(90deg,#ffdf5a, #ff6aa3); color:#0b0020; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(255,180,80,0.06); }
 
-  requestAnimationFrame(tick);
-}
+  .tab { display:none; }
+  .tab.active { display:block; animation: fadeIn 220ms ease; }
 
-/* Start scene */
-function startScene() {
-  lastFrame = performance.now();
-  requestAnimationFrame(tick);
-}
+  @keyframes fadeIn { from {opacity:0; transform: translateY(6px)} to {opacity:1; transform:none} }
 
-/* ------------- END of Canvas / Scene ------------- */
-
-/* Hook window focus/visibility to pause heavy tasks if needed (optional) */
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) {
-    // potentially stop animation loop or reduce frame rate
-  } else {
-    // resume
-    lastFrame = performance.now();
+  .item-card, .gift-card {
+    display:flex; gap:12px; align-items:center;
+    padding:12px; border-radius:12px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+    border: 1px solid rgba(255,255,255,0.04);
+    box-shadow: 0 6px 18px rgba(10,6,20,0.5);
   }
-});
+  .item-left { display:flex; gap:12px; align-items:center; }
+  .item-img, .gift-img { width:72px; height:72px; object-fit:cover; border-radius:10px; box-shadow: 0 6px 18px rgba(0,0,0,0.4); }
+  .item-title { font-weight:800; font-size:15px; color:#fff; }
+  .item-price .accent { color:#ffd966; font-weight:700; }
+  .item-right { display:flex; flex-direction:column; gap:8px; align-items:flex-end; }
 
-/* ------------- Misc: small helper functions for debug ------------- */
-window.__porthub_reload = async function() {
-  await loadItems(); await loadGifts();
-  await refreshAfterTransaction();
-  alert("Reloaded data");
-};
+  .btn { padding:8px 10px; border-radius:9px; cursor:pointer; font-weight:700; border:none; font-size:13px; }
+  .btn-buy { background: linear-gradient(90deg,#ffd966,#ff6aa3); color:#081026; }
+  .btn-outline { background:transparent; border:1px solid rgba(255,217,102,0.12); color:#ffd966; }
 
-/* ============================
-   End of /public/script.js
-   ============================
+  input[type="number"], input[type="text"] {
+    padding:10px 12px; border-radius:10px; border:none; outline:none;
+    background: rgba(20,12,40,0.65);
+    color: #ffdfe6; font-weight:600; width:100%;
+    box-shadow: inset 0 -1px 0 rgba(255,255,255,0.02);
+  }
+  input::placeholder { color: rgba(255,255,255,0.25); font-weight:600; }
+
+  .porthub-toasts { position: fixed; right: 18px; bottom: 18px; z-index: 9999; display:flex; flex-direction:column; gap:8px; }
+  .ph-toast { padding:10px 14px; border-radius:10px; background: linear-gradient(90deg, rgba(0,0,0,0.6), rgba(255,255,255,0.02)); color:#fff; transform: translateY(10px); opacity:0; transition: all .28s ease; box-shadow: 0 8px 30px rgba(0,0,0,0.45); }
+  .ph-toast.visible { opacity:1; transform:none; }
+
+  .empty-note { padding:14px; color: rgba(255,255,255,0.6); }
+  .mono { font-family: monospace; font-size:12px; color: #ffdfe6; }
+  .error { color: #ffb3b3; }
+  `;
+  const s = document.createElement("style");
+  s.innerHTML = css;
+  document.head.appendChild(s);
+})();
+
+/* =======================
+   18. SERVER REQUIREMENTS (brief)
+   ======================= */
+/*
+To enable full functionality (secure Supabase usage + realtime events), your server should:
+
+1) Keep SUPABASE_URL and SUPABASE_KEY (service role) in environment variables in Render.
+2) Use supabase-js on the server to:
+   - provide endpoints:
+     POST /api/auth         { telegram_id, username } -> creates/returns users row
+     GET  /api/items        -> returns items (with owner username)
+     POST /api/items/new    -> create new item (body contains telegram_id, name, price, image, link)
+     POST /api/buy          -> { buyer_tg, item_id } -> performs transaction (check balance, 2% commission), updates balances, inserts transactions
+     GET  /api/gifts/:telegram_id -> returns gifts for user's telegram id
+     POST /api/admin/give   -> { admin_id, target_id, amount } -> only allow if admin_id === OWNER_TELEGRAM_ID
+     GET  /api/balance/:telegram_id -> returns { balance }
+
+3) Realtime notifications:
+   - The server should either:
+     A) Subscribe to Supabase Realtime on the server (recommended) and when a new row is inserted into `gifts` (or `items`), forward a simple event to connected clients via SSE at /events (e.g. `event: new_gift` with JSON payload)
+     B) Or implement a Telegram Bot webhook that, when the manager receives a collectible message, inserts a `gifts` row into Supabase and then notifies clients via SSE.
+
+4) SSE endpoint on server:
+   - Implement `/events` that holds open connections and sends events:
+     res.write(`event: new_gift\ndata: ${JSON.stringify({gift, from_telegram_id, from_username, to_telegram_id})}\n\n`);
+   - Clean up connections properly.
+
+Security notes:
+- Do NOT expose service_role key to frontend.
+- SSE endpoint can be public, but it's better to only allow authenticated users (optional).
+
+If you want, я могу сразу сгенерировать серверные SSE-handling изменения (server.js patch) — скажи и я пришлю.
 */
+
+/* =======================
+   19. End
+   ======================= */
+console.log("PortHub frontend loaded — premium UI initialized.");
